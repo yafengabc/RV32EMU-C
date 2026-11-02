@@ -6,7 +6,7 @@
 // timed region, so the number is directly comparable with `rv32emu-c -bench`.
 //
 // This file is a verbatim copy of the Go repository's tools/benchrun/main.go.
-// compare.ps1 copies it into a scratch module named "rv32emu" together with the
+// the bench driver copies it into a scratch module named "rv32emu" together with the
 // emulator's internal/{cpu,elf,mem,perip,rom} packages, then runs
 // `go build ./tools/benchrun` there. Keeping the file identical (same import
 // paths, same loop shape) matters: the closure below is what the compiler sees

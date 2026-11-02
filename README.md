@@ -8,9 +8,9 @@
 
 ```
 rv32emu-c/
-├─ build.ps1                  Windows 一键编译
-├─ build_asan.ps1             ASan 版本（clang -fsanitize=address + lld）
-├─ Makefile                   make 环境
+├─ go.mod                    Go 工具模块（模拟器本体仍是 C）
+├─ cmd/rv32emu-build/        一键构建器：exe / DLL / ASan / leak 驱动 / 生成器
+├─ Makefile                  有 make 的环境：make all / make emu ...
 ├─ src/
 │  ├─ rv32.h                  公共类型、地址映射、接口
 │  ├─ cpu.c                   Step、RV32I/M、C 扩展、CSR、trap、PMP
@@ -23,22 +23,21 @@ rv32emu-c/
 │  └─ main.c                  CLI、machine、软件复位、bench 模式
 ├─ tools/                     泄漏 / 会话测试驱动（Windows）
 └─ bench/
-   ├─ compare.ps1             Go vs C 自动对比（-IncludeTinyOS / -IncludeUnicorn）
+   ├─ results.md              compare 生成的最近一次结果（已在 .gitignore）
    ├─ go-repo.txt             Go 仓库路径（默认 ../RV32EMU）
-   ├─ benchdata/              Go 侧计时器 + fib/pi/sort/sieve ELF 生成器
-   ├─ gen_workloads.py        pi / ALU / memory 负载
-   ├─ bench_unicorn.c/.py     Unicorn 2.1.4 对照与直线代码测速
-   ├─ qemu_check.py           QEMU 结果校验与测速（乐鑫 esp32c3 / 上游 virt）
-   ├─ tinyos_qemu.py          TinyOS 在 esp32c3 QEMU 上的启动/耗时复现
-   ├─ asan_test.py / memcheck.py / leak_test.py
+   ├─ bench_unicorn.c         Unicorn 2.1.4 C 对照（-IncludeUnicorn 时编译）
    ├─ README.md               计时口径与 Unicorn 复现结论
-   └─ results.md              compare.ps1 生成的最近一次结果（已在 .gitignore）
+   └─ benchdata/              Go 模块：生成器 + 统一 bench 工具
+      ├─ genbench/, genfib/, genwork/    fib/pi/sort/sieve/ALU/mem 镜像生成器
+      ├─ benchrun/            Go 侧计时器（与 Go 仓库 tools/benchrun 同一份）
+      └─ cmd/bench/           统一驱动：check / tinyos / compare / mem
 ```
 
 两个前提：
 
-1. **Go 版 checkout**。`bench/compare.ps1` 需要一个 RV32EMU checkout 来编译 Go 侧计时器。
-   它会依次尝试 `-GoRepo <路径>`、`bench/go-repo.txt`、环境变量 `RV32EMU_GO_REPO`，
+1. **Go 版 checkout**。`bench compare` 需要一个 RV32EMU checkout 来编译 Go 侧计时器
+   （`bench check` / `tinyos` / `mem` 不需要）。
+   它会依次尝试 `-go-repo <路径>`、`bench/go-repo.txt`、环境变量 `RV32EMU_GO_REPO`，
    最后猜测两种常见布局（C 仓库放在 `RV32EMU/rv32emu-c`，或与 `RV32EMU/` 并列）。
    默认的 `bench/go-repo.txt` 写的是 `../RV32EMU`，按自己的目录结构改一行即可。
    计时器源码（`bench/benchdata/benchrun/main.go`，以及 `genbench`/`genfib`）随本仓库提供，
@@ -48,24 +47,19 @@ rv32emu-c/
 
 ## 构建
 
-Windows（MSYS2 UCRT64 / MinGW gcc）：
+统一入口是 Go 构建器（取代原来的 build.ps1 / build_asan.ps1，PowerShell 已移除）：
 
 ```powershell
 cd rv32emu-c
-.\build.ps1
-# 可选：.\build.ps1 -Native   # 加 -march=native
-```
-
-如果系统禁止运行本地脚本，用：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\build.ps1
+go run ./cmd/rv32emu-build              # 全部：exe、DLL、ASan、leak 驱动、生成器、bench 工具
+go run ./cmd/rv32emu-build emu          # 只构建 build/rv32emu-c.exe
 ```
 
 有 make 的环境：
 
 ```powershell
-make
+make               # 等价于 go run ./cmd/rv32emu-build
+make emu
 ```
 
 手工命令：
@@ -114,7 +108,7 @@ gcc -std=c11 -O3 -DNDEBUG -flto -o build/rv32emu-c.exe src/*.c
 
 ## 在 QEMU 上验证
 
-`bench/qemu_check.py` 把同样四个程序跑在 QEMU 上，并用独立的 Python 模型
+`rv32emu-bench check` 把同样四个程序跑在 QEMU 上，并用独立的参考模型
 （fib 递推、Leibniz 级数、冒泡、筛法）核对 a0。两种机器都支持：
 
 | 机器 | QEMU | 内存映射 | 收尾方式 |
@@ -128,8 +122,9 @@ gcc -std=c11 -O3 -DNDEBUG -flto -o build/rv32emu-c.exe src/*.c
 里出现 `esp32c3` 就会自动选中它：
 
 ```powershell
-python bench\qemu_check.py                  # 自动优先 esp32c3
-python bench\qemu_check.py -machine virt -qemu C:\msys64\ucrt64\bin\qemu-system-riscv32.exe
+go run ./cmd/rv32emu-build                 # 先构建生成器
+build\rv32emu-bench.exe check              # 自动优先 esp32c3
+build\rv32emu-bench.exe check -machine virt -qemu C:\msys64\ucrt64\bin\qemu-system-riscv32.exe
 ```
 
 最近一次结果（乐鑫 QEMU，`-reps 5`；`-work 15` 把每次运行拉到 0.1~0.3 s，
@@ -194,7 +189,8 @@ TinyOS 要按真机布局拼一个 4 MiB flash 镜像（kernel 在 0、littlefs 
 复现：
 
 ```powershell
-python bench\tinyos_qemu.py      # 拼 flash 镜像、启动、计时
+build\rv32emu-bench.exe tinyos             # 拼 flash 镜像、启动、计时
+build\rv32emu-bench.exe tinyos --tb-stats  # 加 -d in_asm 并统计重翻译的 TB
 ```
 
 这也是这个项目最初被写出来的原因：TinyOS 在 QEMU 上跑基准时频繁超时，最后定位到
@@ -205,7 +201,7 @@ python bench\tinyos_qemu.py      # 拼 flash 镜像、启动、计时
 
 用 `-d in_asm` 可以直接看到：`bench 1024 4` 是 4096 次迭代 × 2 个阶段 = 8192 次，
 期间 `0x403bc3b2`~`0x403bc3be` 的 5 个 TB 各被翻译了 8198~8201 次——基本就是每次迭代
-把整段循环重新翻译一遍。`python bench\tinyos_qemu.py --tb-stats` 会打印这个统计。
+把整段循环重新翻译一遍。`rv32emu-bench tinyos --tb-stats` 会打印这个统计。
 
 对照之下，本移植的块缓存以 4 KiB 页版本号失效：数据区（SRAM）和代码页是分开的，
 写数据不会碰代码页；即使真的自修改代码，代价也只是重新解码最多 32 条指令，
@@ -260,20 +256,22 @@ QEMU 仅用于功能对照。
   循环型镜像的「计 N 条」直接跳出循环；`count=0` 一直跑到映射末尾后继续取下一张
   图的零页，永不返回。
 
-能正常跑的只有**单页内的直线代码**：`bench/bench_unicorn.py` 计时 16000 条 `nop`，
-无 hook 约 0.018 s、带 `UC_HOOK_CODE` 约 0.021 s（这 16k 条里 Python 的 `emu_start`
-调用开销占了大头，但已经说明在同样的「每条指令都要记一次数」口径下，JIT 并不占便宜；
-C 侧同样 16000 条约 0.000028 s）。早期几个 README 里「Unicorn 快 13.8x / 2.0x」的数字来自另一台机器、另一版 Unicorn，
+能正常跑的只有**单页内的直线代码**：16000 条 `nop` 约 0.018 s、带 `UC_HOOK_CODE`
+约 0.021 s（这 16k 条里 Python 的 `emu_start` 调用开销占了大头，但已经说明在同样的
+「每条指令都要记一次数」口径下，JIT 并不占便宜；C 侧同样 16000 条约 0.000028 s）。
+这一项是一次性探针，探针脚本已随 Python 脚本一起删除，数字保留在这里作为结论。
+早期几个 README 里「Unicorn 快 13.8x / 2.0x」的数字来自另一台机器、另一版 Unicorn，
 本仓库复现不出来，已从 Go 版 README 撤下。详细复现方法见 `bench/README.md`。
 
 复现：
 
 ```powershell
 cd rv32emu-c
-.\bench\compare.ps1 -Reps 7 -IncludeTinyOS
+go run ./cmd/rv32emu-build emu
+build\rv32emu-bench.exe compare -reps 7 -tinyos
 ```
 
-脚本会编译两边、生成 `fib/pi/alu/mem/sort/sieve` ELF，输出表格并写入 `bench/results.md`。
+`compare` 会编译两边、生成 `fib/pi/alu/mem/sort/sieve` ELF，输出表格并写入 `bench/results.md`。
 
 ## 边界
 
@@ -305,13 +303,13 @@ Go 版靠 GC 兜底，C 版没有；这个项目里所有所有权都是“谁�
 
 ```powershell
 cd rv32emu-c
-.\build_asan.ps1                 # ASan 版本（clang -fsanitize=address + lld）
-python bench\memcheck.py         # 一键：ASan + 会话泄漏 + 核心单测
+go run ./cmd/rv32emu-build      # 含 ASan 版本、DLL 和 leak 驱动
+build\rv32emu-bench.exe mem     # 一键：ASan + 会话泄漏 + 核心单测
 ```
 
 覆盖范围：
 
-- **ASan**（`bench/asan_test.py`）：TinyOS 启动、脚本化控制台（cat/ls/reboot）、
+- **ASan**（`rv32emu-bench mem` 的第一段）：TinyOS 启动、脚本化控制台（cat/ls/reboot）、
   缺失/损坏/截断 ELF、无参数、6 个基准镜像各 200 万条 —— 抓越界、UAF、double free。
 - **会话泄漏**（`tools/leakrun.c` + `build/rv32emu-c.dll`）：同一进程里把
   TinyOS 启动/退出重复 6 次，`-join` 让 `_shutdown` 前经过一次

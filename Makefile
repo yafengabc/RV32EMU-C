@@ -1,28 +1,36 @@
+GO      ?= go
 CC      ?= gcc
-CFLAGS  ?= -std=c11 -O3 -DNDEBUG -flto -Wall -Wextra
-LDFLAGS ?= -flto
+CFLAGS  ?= -std=c11 -O0 -g3 -Wall -Wextra
 
-SRC := $(wildcard src/*.c)
-HDR := $(wildcard src/*.h)
-BIN := build/rv32emu-c
+# The Go builder is the single entry point (no PowerShell, no shell-specific
+# recipes): it knows where MSYS2 lives on Windows and skips DLL/ASan there.
+.PHONY: all emu dll asan tools gen bench debug clean
 
-ifeq ($(OS),Windows_NT)
-BIN := build/rv32emu-c.exe
-endif
+all:
+	$(GO) run ./cmd/rv32emu-build
 
-.PHONY: all clean debug
+emu:
+	$(GO) run ./cmd/rv32emu-build emu
 
-all: $(BIN)
+dll:
+	$(GO) run ./cmd/rv32emu-build dll
 
-$(BIN): $(SRC) $(HDR)
+asan:
+	$(GO) run ./cmd/rv32emu-build asan
+
+tools:
+	$(GO) run ./cmd/rv32emu-build tools
+
+gen:
+	$(GO) run ./cmd/rv32emu-build gen
+
+bench:
+	$(GO) run ./cmd/rv32emu-build bench
+
+# Unoptimised binary with symbols for gdb / -trace sessions.
+debug:
 	@mkdir -p build
-	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDFLAGS)
-
-debug: CFLAGS := -std=c11 -O0 -g3 -Wall -Wextra
-debug: LDFLAGS :=
-debug: $(SRC) $(HDR)
-	@mkdir -p build
-	$(CC) $(CFLAGS) -o build/rv32emu-c-debug$(if $(filter Windows_NT,$(OS)),.exe,) $(SRC)
+	$(CC) $(CFLAGS) -o build/rv32emu-c-debug$(if $(filter Windows_NT,$(OS)),.exe,) src/*.c
 
 clean:
 	rm -rf build

@@ -4,33 +4,35 @@ Benchmarks the Go emulator, the C port and (where possible) Unicorn 2.1.4 on
 the same RISC-V binaries.
 
 ```
-gen_workloads.py    alu_loop / mem_loop / pi_big (Go vs C numbers)
-compare.ps1         builds both, runs them, writes results.md
-qemu_check.py       runs fib/pi/sort/sieve on QEMU, verifies and times them
-tinyos_qemu.py      boots TinyOS from a flash image on esp32c3 and times bench
-go-repo.txt         where the Go emulator (RV32EMU) checkout lives
-benchdata/          Go sources compiled for the run:
-  benchrun/           timing harness (same loop as the Go emulator's main.go)
+benchdata/          Go module for everything below:
+  cmd/bench/          the driver: check / tinyos / compare / mem
+  benchrun/           Go timing harness (byte-identical to RV32EMU tools/benchrun)
   genbench/, genfib/  hand-assembled benchmark ELFs
+  genwork/            alu_loop / mem_loop / pi_big + -max parity images
+go-repo.txt         where the Go emulator (RV32EMU) checkout lives
 bench_unicorn.c     Unicorn C harness (-max N = uc_emu_start count)
-bench_unicorn.py    Unicorn straight-line speed probe
 ```
 
-Run:
+Build and run (all commands are one Go tool; there are no Python or PowerShell
+scripts in this directory any more):
 
 ```powershell
 cd rv32emu-c
-.\bench\compare.ps1 -Reps 7 -IncludeTinyOS
+go run ./cmd/rv32emu-build          # emulator, DLL, ASan, leak drivers, generators
+build\rv32emu-bench.exe compare -reps 7 -tinyos
+build\rv32emu-bench.exe check       # QEMU correctness + MIPS
+build\rv32emu-bench.exe tinyos --tb-stats
+build\rv32emu-bench.exe mem
 ```
 
 The Go side needs a checkout of <https://github.com/yafengabc/RV32EMU>. The
-script looks for it (in this order) at `-GoRepo <path>`, the path in
+driver looks for it (in this order) at `-go-repo <path>`, the path in
 `bench/go-repo.txt`, `$env:RV32EMU_GO_REPO`, and finally the two common layouts
 (`RV32EMU/rv32emu-c` or a sibling `RV32EMU/`). Default is `../RV32EMU` relative
 to `bench/`, i.e. a C clone placed inside the Go repository.
 
 `benchrun` lives in `benchdata/benchrun/main.go` and is a verbatim copy of the
-Go repository's `tools/benchrun/main.go`. On each run the script:
+Go repository's `tools/benchrun/main.go`. On each run `compare`:
 
 1. creates a scratch directory with a `go.mod` that says `module rv32emu`,
 2. copies the checkout's `internal/{cpu,elf,mem,perip,rom}` packages into it,
@@ -47,9 +49,9 @@ the Go side about 1.7x slower and inflates every ratio in the table.
 
 ## QEMU: two machines
 
-`qemu_check.py` verifies the same four programs on QEMU. Two machines are
-supported and the results must match both the Go/C emulators and a Python
-model of each algorithm:
+`rv32emu-bench check` verifies the same four programs on QEMU. Two machines are
+supported and the results must match both the Go/C emulators and an independent
+Go model of each algorithm:
 
 * **`esp32c3`** - Espressif's QEMU (`github.com/espressif/qemu`). It models the
   real C3 map (code at 0x40000000, DRAM 0x3FC80000..0x3FCDFFFF, UART0 at
@@ -63,8 +65,8 @@ model of each algorithm:
   print followed by a write to the SiFive test device at 0x100000.
 
 ```powershell
-python bench\qemu_check.py          # picks esp32c3 when available
-python bench\qemu_check.py -machine virt
+build\rv32emu-bench.exe check                 # picks esp32c3 when available
+build\rv32emu-bench.exe check -machine virt
 ```
 
 Timing: each image is run `-reps` times and the best wall time is kept, minus the
@@ -87,7 +89,7 @@ The C3 machine implements 384 KiB of DRAM (up to 0x3FCDFFFF), so the stack is
 placed at 0x3FCDF000. rv32emu models a 512 KiB window and also accepts
 0x3FCFF000; real hardware and QEMU do not.
 
-TinyOS on the same machine: `tinyos_qemu.py` builds a real flash image (kernel
+TinyOS on the same machine: `tinyos` builds a real flash image (kernel
 at 0, littlefs at 0x100000) and boots it with `-drive file=...if=mtd`; `-kernel`
 crashes in the ROM area. It reaches `tos>` in ~0.22 s and works, but the C3
 memory/SPI-flash path is pathologically slow: `bench 1024 4` takes ~200 ms and
@@ -119,8 +121,9 @@ print every executed address:
 * with `count=0` a run to the end of the last mapped page keeps fetching the
   next page's zeros and never returns to the caller.
 
-What does work is straight-line code inside one page. `bench_unicorn.py`
-times 16,000 `nop`s in a row (through the Python bindings):
+What does work is straight-line code inside one page. A one-off Python probe
+timed 16,000 `nop`s in a row (through the Python bindings; the probe was
+removed with the other scripts):
 
 ```
 [bench] unicorn straight-line n=16000 sec=0.01778680 mips=1
@@ -144,10 +147,4 @@ branches the JIT advantage shrinks to about 2x.
 gcc -O2 -o build/bench_unicorn.exe bench/bench_unicorn.c ^
     -I C:/msys64/ucrt64/include -L C:/msys64/ucrt64/lib -lunicorn
 build\bench_unicorn.exe -elf build\benchdata\fib.elf -reps 5 -max 2000000
-```
-
-Straight-line probe:
-
-```powershell
-python bench/bench_unicorn.py -n 16000 -reps 7
 ```
