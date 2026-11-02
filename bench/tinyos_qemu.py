@@ -18,8 +18,10 @@ kernel crashes at 0x40000134.
 """
 
 import argparse
+import collections
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -109,6 +111,8 @@ def main():
     ap.add_argument("-boot-timeout", type=float, default=20.0)
     ap.add_argument("-bench", default="1024 4", help="arguments for the guest bench command")
     ap.add_argument("--no-bench", action="store_true")
+    ap.add_argument("--tb-stats", action="store_true",
+                    help="also log -d in_asm and report the most retranslated TBs")
     args = ap.parse_args()
 
     for label, path in (("kernel", args.kernel_bin), ("ramdisk", args.ramdisk)):
@@ -127,9 +131,17 @@ def main():
     print("flash: %d MiB (kernel %d B @0, ramdisk %d B @0x%X)"
           % (FLASH_SIZE // (1024 * 1024), klen, rlen, FS_OFFSET))
 
+    tb_log = None
     cmd = [qemu, "-M", "esp32c3", "-m", "8M",
            "-drive", "file=%s,if=mtd,format=raw" % flash,
            "-display", "none", "-serial", "stdio", "-monitor", "none"]
+    if args.tb_stats:
+        tb_log = os.path.join(BUILD, "tinyos-tb.log")
+        try:
+            os.remove(tb_log)
+        except OSError:
+            pass
+        cmd += ["-d", "in_asm", "-D", tb_log]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, bufsize=0)
     reader = Reader(proc)
@@ -146,6 +158,7 @@ def main():
         if args.no_bench:
             return 0
 
+        before = os.path.getsize(tb_log) if tb_log else 0
         proc.stdin.write(("bench " + args.bench).strip().encode() + b"\r\n")
         proc.stdin.flush()
         t1 = time.perf_counter()
@@ -155,6 +168,17 @@ def main():
             print("bench '%s' did not finish" % args.bench)
             return 1
         print("bench %-10r: %.1f ms" % (args.bench, (hit - t1) * 1000))
+
+        if tb_log:
+            with open(tb_log, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(before)
+                tail = f.read()
+            starts = re.findall(r"^(0x[0-9a-f]{8}):\s", tail, re.M)
+            top = collections.Counter(starts).most_common(6)
+            print("TB translations during bench: %d distinct, %d total"
+                  % (len(set(starts)), len(starts)))
+            for addr, n in top:
+                print("  %s retranslated x%d" % (addr, n))
     finally:
         proc.kill()
         try:
