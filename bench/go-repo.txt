@@ -1,0 +1,7 @@
+# Where the Go reference emulator is checked out. compare.ps1 uses this path
+# when -GoRepo is not passed; a relative path is resolved against the bench/
+# directory first, then against the directory that contains this repository.
+# Typical layouts:
+#   C:/work/RV32EMU/rv32emu-c      (C port cloned next to the Go repo)  -> ../RV32EMU
+#   C:/work/rv32emu-c              (C port on its own)                  -> ../../RV32EMU
+../RV32EMU
