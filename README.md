@@ -28,6 +28,7 @@ rv32emu-c/
    ├─ benchdata/              Go 侧计时器 + fib/pi/sort/sieve ELF 生成器
    ├─ gen_workloads.py        pi / ALU / memory 负载
    ├─ bench_unicorn.c/.py     Unicorn 2.1.4 对照与直线代码测速
+   ├─ qemu_check.py           QEMU 结果校验（乐鑫 esp32c3 / 上游 virt）
    ├─ asan_test.py / memcheck.py / leak_test.py
    ├─ README.md               计时口径与 Unicorn 复现结论
    └─ results.md              compare.ps1 生成的最近一次结果（已在 .gitignore）
@@ -110,6 +111,48 @@ gcc -std=c11 -O3 -DNDEBUG -flto -o build/rv32emu-c.exe src/*.c
 2. TinyOS `kernel-esp32c3.elf + ramdisk` 跑到 `tos>`，5,000,000 条指令后的 UART 文本、`timg0 fires=498`、`interrupts=296`、`exceptions=19` 与 Go 版一致。
 3. 同一份 C 程序分别用 `-max`（RunHot）和 `-step`（逐条 Step）在 1M 指令内对比 PC/寄存器；早期版本正是靠这个抓到 `C.JR` 解码漏了 `term` 标志的 bug。
 
+## 在 QEMU 上验证
+
+`bench/qemu_check.py` 把同样四个程序跑在 QEMU 上，并用独立的 Python 模型
+（fib 递推、Leibniz 级数、冒泡、筛法）核对 a0。两种机器都支持：
+
+| 机器 | QEMU | 内存映射 | 收尾方式 |
+|---|---|---|---|
+| `esp32c3` | 乐鑫维护的 qemu-system-riscv32（`github.com/espressif/qemu`） | 与真机一致：0x40000000 取指、DRAM `0x3FC80000~0x3FCDFFFF`、UART0 `0x60000000` | 打印 a0 后自旋，脚本读到结果再结束进程 |
+| `virt` | 上游 qemu-system-riscv32 | DRAM `0x80000000`，程序需要重链接 | 16550 打印 + SiFive test(`0x100000`) 关机 |
+
+乐鑫 QEMU 的 Windows 构建是 `espressif/qemu` release 里的
+`qemu-riscv32-softmmu-* -x86_64-w64-mingw32.tar.xz`，解压后 `qemu/bin/qemu-system-riscv32.exe`
+即为所需（本机放在 `C:\Users\SONG\Tools\esp-qemu`，也可用 `ESP_QEMU` 指定）。`-M help`
+里出现 `esp32c3` 就会自动选中它：
+
+```powershell
+python bench\qemu_check.py                  # 自动优先 esp32c3
+python bench\qemu_check.py -machine virt -qemu C:\msys64\ucrt64\bin\qemu-system-riscv32.exe
+```
+
+最近一次结果（乐鑫 QEMU）：
+
+```
+machine: esp32c3   qemu: C:\Users\SONG\Tools\esp-qemu\qemu\bin\qemu-system-riscv32.exe
+image base=0x40000000 stack=0x3FCDF000 uart=0x00060000 exit=spin
+
+workload               expected     qemu              sec  result
+fib(28)                0x0004D973   0x0004D973      0.039  PASS
+pi (Q16.16, N=10000)   0x00032420   0x00032420      0.028  PASS
+bubble sort x19000     0x00000000   0x00000000      0.033  PASS
+sieve(1001) x1340      0x000000A8   0x000000A8      0.031  PASS
+```
+
+注意：
+
+- 上游 `virt` 的 DRAM 在 `0x80000000`，必须重链接；脚本用 `-base/-stack/-data` 重新生成，
+  计算部分与 rv32emu 的镜像逐条相同，只换出口。
+- `esp32c3` 机器只实现 384 KiB DRAM（到 `0x3FCDFFFF`），所以栈放在 `0x3FCDF000`。
+  rv32emu 按 512 KiB 窗口建模，`0x3FCFF000` 也能用——真机/QEMU 不行。
+- TinyOS 依赖 C3 的 flash/ROM 布局和 littlefs 分区，要跑得先按 esp-idf 的方式生成 flash 镜像，
+  不在本仓库的校验范围内。
+
 ## 速度对比
 
 计时口径：**只计 `RunHot(1000)` 批次 + TIMG0 tick**，不含进程启动、ELF 加载、终端输出；每个负载跑 7 次取中位数。Go 侧用 `bench/benchdata/benchrun`（与 Go 仓库 `tools/benchrun` 同一份源码），C 侧用 `-bench`，两边是同一套批次循环。
@@ -118,26 +161,25 @@ gcc -std=c11 -O3 -DNDEBUG -flto -o build/rv32emu-c.exe src/*.c
 
 | 负载 | 执行指令数 | Go MIPS | C MIPS | C/Go |
 |---|---:|---:|---:|---:|
-| fib(28) 递归 | 15,426,855 | ~383 | ~442 | 1.15x |
-| pi（Leibniz，含 M 扩展除法） | 2,000,000 | ~532 | ~548 | 1.03x |
-| ALU 紧循环 | 2,000,000 | ~531 | ~567 | 1.07x |
-| 内存读写循环 | 2,000,000 | ~131 | ~159 | 1.22x |
-| 冒泡排序循环 | 20,000,000 | ~105 | ~134 | 1.28x |
-| 素数筛循环 | 20,000,000 | ~172 | ~231 | 1.35x |
-| TinyOS 启动到 shell | 5,000,000 | ~348 | ~412 | 1.19x |
+| fib(28) 递归 | 15,426,855 | ~381 | ~441 | 1.16x |
+| pi（Leibniz，含 M 扩展除法） | 2,000,000 | ~379 | ~432 | 1.14x |
+| ALU 紧循环 | 2,000,000 | ~429 | ~441 | 1.03x |
+| 内存读写循环 | 2,000,000 | ~441 | ~529 | 1.20x |
+| 冒泡排序 | 19,950,006 | ~412 | ~465 | 1.13x |
+| 素数筛 | 19,931,166 | ~465 | ~503 | 1.08x |
+| TinyOS 启动到 shell | 5,000,000 | ~345 | ~406 | 1.18x |
 
 结论：
 
-- 总体 **1.03x ~ 1.35x**，没有哪类负载出现 C 反而更慢；但纯 ALU / 除法循环已经基本追平。
-- **访存 + 分支**（内存循环、冒泡、筛法）差距最大，约 22%~35%：每次 load/store 都要过
+- 总体 **1.02x ~ 1.22x**，没有哪类负载出现 C 反而更慢；纯 ALU 循环基本追平。
+- **访存 + 分支**（内存循环、排序、筛法）差距最大，约 8%~20%：每次 load/store 都要过
   `priv`/PMP/平铺区判断，C 生成的代码更紧凑。
-- **纯 ALU / 除法**（pi、ALU loop）约 3%~8%：Go 的块解释器把位域解析摊掉之后，一个块里
-  几乎没有额外开销。fib 的递归压栈/出栈让 C 领先约 15%。
-- **真实系统负载**（TinyOS 启动，含 U-mode、PMP、timer 中断、UART）约 17%：外围和异常
-  路径既没有把优势吃掉，也没有额外放大。
-- 抖动不小：同一个二进制连跑 5 次，Go 在 pi 上是 485~546 MIPS、筛法是 158~173、TinyOS
-  是 285~357；C 在 pi 上是 538~549。表里是四次完整对比的中位数，比值按区间看。20M 长循环
-  （排序、筛法）和自终止的 fib 相对稳定，但也受主机温度/后台负载影响。
+- **纯 ALU / 除法**（pi、ALU loop）约 3%~14%：Go 的块解释器把位域解析摊掉之后，一个块里
+  几乎没有额外开销。fib 的递归压栈/出栈让 C 领先约 16%。
+- **真实系统负载**（TinyOS 启动，含 U-mode、PMP、timer 中断、UART）约 16%~18%。
+- 抖动不小：同一个二进制连跑 5 次，Go 在 pi 上是 368~430 MIPS、TinyOS 是 285~357；
+  C 在 pi 上是 425~440。表里是三次完整对比的中位数，比值按区间看。排序/筛法是自然结束的
+  ~20M 条程序，相对稳定，但也受主机温度/后台负载影响。
 - **计时器必须与 Go 仓库 `tools/benchrun/main.go` 逐字节一致**（`bench/benchdata/benchrun`
   就是这份拷贝）。曾经把热循环包成 `measure()` → `measureBody()` 两层函数再编译，Go 侧
   直接慢 **1.7 倍**，算出来的倍数全是假的——循环的结构会改变 Go 的内联/逃逸分析结果。

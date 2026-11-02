@@ -41,6 +41,12 @@ def lui(rd, imm20):
     return (imm20 << 12) | (rd << 7) | 0x37
 
 
+def j(rd, imm):
+    x = imm & 0x1FFFFF
+    return (((x >> 20) & 1) << 31 | ((x >> 1) & 0x3FF) << 21 |
+            ((x >> 11) & 1) << 20 | ((x >> 12) & 0xFF) << 12 | (rd << 7) | 0x6F)
+
+
 FILLER = i(5, 5, 1)   # addi x5, x5, 1 (compact, always legal, no faults)
 
 
@@ -66,7 +72,7 @@ def main():
 
     # 3-instruction memory loop over one page, unsigned +: lw, add, sw, bne.
     mem = [
-        lui(8, 0x40000),          # x8 = 0x40000000 (data + code page)
+        lui(8, 0x3FC80),          # x8 = 0x3FC80000 (SRAM scratch, NOT the code page)
         i(9, 0, 1),               # step = 1
         i(10, 0, 0),              # sum = 0
         i(14, 8, 0, 2, 0x03),     # loop: lw x14, 0(x8)
@@ -95,7 +101,13 @@ def main():
     write("alu_run.elf", out, alu + [0x00000073])
     write("mem_run.elf", out, mem + [0x00000073])
     write("pi_run.elf", out, pi + [0x00000073])
-    print("generated -max parity images and run images in", out)
+
+    # Plain endless loops: compare.ps1 runs these with `-max 2M`, so they end
+    # only when the instruction budget runs out (no ecall, no filler).
+    write("alu_loop.elf", out, alu[:3] + [j(0, -12)])
+    write("mem_loop.elf", out, mem)
+    write("pi_big.elf", out, pi)
+    print("generated -max parity images, run images and loop images in", out)
 
 
 if __name__ == "__main__":

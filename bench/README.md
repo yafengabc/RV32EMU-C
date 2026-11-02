@@ -6,6 +6,7 @@ the same RISC-V binaries.
 ```
 gen_workloads.py    alu_loop / mem_loop / pi_big (Go vs C numbers)
 compare.ps1         builds both, runs them, writes results.md
+qemu_check.py       runs fib/pi/sort/sieve on QEMU and verifies the results
 go-repo.txt         where the Go emulator (RV32EMU) checkout lives
 benchdata/          Go sources compiled for the run:
   benchrun/           timing harness (same loop as the Go emulator's main.go)
@@ -42,6 +43,32 @@ commit when comparing, otherwise the numbers mix versions.
 Keep the harness byte-identical to `tools/benchrun/main.go`: restructuring the
 hot loop (for example wrapping it in `measure()`/`measureBody()` helpers) makes
 the Go side about 1.7x slower and inflates every ratio in the table.
+
+## QEMU: two machines
+
+`qemu_check.py` verifies the same four programs on QEMU. Two machines are
+supported and the results must match both the Go/C emulators and a Python
+model of each algorithm:
+
+* **`esp32c3`** - Espressif's QEMU (`github.com/espressif/qemu`). It models the
+  real C3 map (code at 0x40000000, DRAM 0x3FC80000..0x3FCDFFFF, UART0 at
+  0x60000000), so the images keep the same base as the rv32emu ones; only the
+  exit sequence differs (print a0 on UART0, then spin, and the harness stops
+  QEMU once it has the line). Windows builds are published in the
+  `espressif/qemu` releases as `qemu-riscv32-softmmu-*-x86_64-w64-mingw32.tar.xz`;
+  point `ESP_QEMU` at `qemu/bin/qemu-system-riscv32.exe`.
+* **`virt`** - upstream qemu-system-riscv32. DRAM starts at 0x80000000, so the
+  generators are re-invoked with `-base/-stack/-data`; the exit is a 16550 hex
+  print followed by a write to the SiFive test device at 0x100000.
+
+```powershell
+python bench\qemu_check.py          # picks esp32c3 when available
+python bench\qemu_check.py -machine virt
+```
+
+The C3 machine implements 384 KiB of DRAM (up to 0x3FCDFFFF), so the stack is
+placed at 0x3FCDF000. rv32emu models a 512 KiB window and also accepts
+0x3FCFF000; real hardware and QEMU do not.
 
 ## Unicorn 2.1.4: not usable for these workloads
 
