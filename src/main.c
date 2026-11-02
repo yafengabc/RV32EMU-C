@@ -1,6 +1,7 @@
 #define BUILDING_EMU 1
 #include "console.h"
 #include "embed.h"
+#include "hostin.h"
 #include "rv32.h"
 
 #include <inttypes.h>
@@ -442,6 +443,17 @@ static bool machine_run(machine_t *m) {
             uint64_t p = opt_rxperiod ? opt_rxperiod : 1;
             uint64_t k0 = (n + p - 1) / p;
             uint64_t k1 = (n + ran - 1) / p;
+            if (k1 >= k0) {
+                /* Without -console the guest still has to see piped stdin,
+                 * like the Go build's reader goroutine. Poll on feed
+                 * boundaries (one timer tick by default) so the syscall cost
+                 * stays around one per 10k instructions instead of one per
+                 * batch; a thread would be cheaper but the DLL sessions would
+                 * inherit it. */
+                uint8_t inbuf[256];
+                size_t got = host_stdin_poll(inbuf, sizeof(inbuf));
+                if (got > 0) (void)uart_rx_push(m->uart, inbuf, got);
+            }
             for (uint64_t k = k0; k <= k1; k++) uart_feed(m->uart, opt_rxrate);
         }
         n += ran;

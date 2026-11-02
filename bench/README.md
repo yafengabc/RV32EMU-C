@@ -79,6 +79,10 @@ upstream 11.1.3: ~0.091 s), which is exactly why it has to be subtracted: withou
 it the upstream build looks 3x slower even though both run pi at ~6.6 GIPS. Only
 the recursive fib differs (upstream ~780 vs Espressif ~1115 MIPS).
 
+Scripted console sessions work without `-console`: `hostin.c` polls a pipe or
+redirected file at every input-feed boundary and pushes it into the UART, the
+same way the Go build's reader goroutine does.
+
 The C3 machine implements 384 KiB of DRAM (up to 0x3FCDFFFF), so the stack is
 placed at 0x3FCDF000. rv32emu models a 512 KiB window and also accepts
 0x3FCFF000; real hardware and QEMU do not.

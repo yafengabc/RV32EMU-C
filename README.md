@@ -291,9 +291,10 @@ cd rv32emu-c
   这样复现的。
 - **没有 GDB stub**：调试靠 `-traplog` / `-breakpc` / `-dumpram` / `-step` 这套快照工具。
   比 Go 版少的调试开关见上面「已支持的参数」下的说明。
-- **控制台 / 平台**：控制台有 Win32 与 POSIX 两条实现，模拟器本体在 Linux 也能编译；
-  `tools/leakrun.c`、`tools/leakunit.c` 是 Windows 专用（用 `GetProcessMemoryInfo` 读工作集
-  和私有内存），非 Windows 环境跳过。
+- **控制台 / 平台**：`-console` 是交互终端（Win32 控制台 / POSIX 终端）；**不加 `-console`
+  时也读管道/重定向的 stdin**（`src/hostin.c` 每次放行点非阻塞轮询一次），所以
+  `rv32emu-c ... < cmds.txt` 与 Go 版行为一致。`tools/leakrun.c`、`tools/leakunit.c` 是
+  Windows 专用（用 `GetProcessMemoryInfo` 读工作集和私有内存），非 Windows 环境跳过。
 - **内存所有权**：没有 GC。`bus_new`/`cpu_new`/各设备各自持有资源，`_run` 结束或
   `_shutdown` 时必须释放；对应的泄漏检查在下一节。
 
