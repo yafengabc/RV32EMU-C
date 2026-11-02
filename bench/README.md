@@ -66,6 +66,18 @@ python bench\qemu_check.py          # picks esp32c3 when available
 python bench\qemu_check.py -machine virt
 ```
 
+Timing: each image is run `-reps` times and the best wall time is kept, minus the
+wall time of an almost-empty image (`fib(0)`), which removes QEMU startup and the
+harness' own overhead. Instruction counts come from running the same program in
+halt mode on `build/rv32emu-c.exe`, so the reported MIPS is a rate, not an
+estimate. `-work 15` (default) scales the repeat counts and uses fib(34) so every
+run lasts 0.1-0.3 s; a single 90k-instruction pass is below process-timer noise.
+QEMU is TCG, so these numbers sit one order of magnitude above the interpreters.
+The startup baseline differs a lot between builds (Espressif 9.2.2: ~0.023 s,
+upstream 11.1.3: ~0.091 s), which is exactly why it has to be subtracted: without
+it the upstream build looks 3x slower even though both run pi at ~6.6 GIPS. Only
+the recursive fib differs (upstream ~780 vs Espressif ~1115 MIPS).
+
 The C3 machine implements 384 KiB of DRAM (up to 0x3FCDFFFF), so the stack is
 placed at 0x3FCDF000. rv32emu models a 512 KiB window and also accepts
 0x3FCFF000; real hardware and QEMU do not.

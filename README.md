@@ -131,18 +131,40 @@ python bench\qemu_check.py                  # 自动优先 esp32c3
 python bench\qemu_check.py -machine virt -qemu C:\msys64\ucrt64\bin\qemu-system-riscv32.exe
 ```
 
-最近一次结果（乐鑫 QEMU）：
+最近一次结果（乐鑫 QEMU，`-reps 5`；`-work 15` 把每次运行拉到 0.1~0.3 s，
+指令数是 rv32emu-c 在 halt 镜像上数出来的，时间已扣掉 fib(0) 的启动基线）：
 
 ```
 machine: esp32c3   qemu: C:\Users\SONG\Tools\esp-qemu\qemu\bin\qemu-system-riscv32.exe
-image base=0x40000000 stack=0x3FCDF000 uart=0x00060000 exit=spin
+startup baseline (fib(0)): 0.023 s
 
-workload               expected     qemu              sec  result
-fib(28)                0x0004D973   0x0004D973      0.039  PASS
-pi (Q16.16, N=10000)   0x00032420   0x00032420      0.028  PASS
-bubble sort x19000     0x00000000   0x00000000      0.033  PASS
-sieve(1001) x1340      0x000000A8   0x000000A8      0.031  PASS
+workload               expected     qemu               inst      sec      MIPS  result
+fib(34)                0x005704E7   0x005704E7    276823935    0.271    1115.3   PASS
+pi (Q16.16, N=10000)   0x00032420   0x00032420    297023105    0.069    6494.4   PASS
+bubble sort            0x00000000   0x00000000    299250006    0.136    2639.2   PASS
+sieve(1001)            0x000000A8   0x000000A8    298967407    0.107    3549.9   PASS
 ```
+
+QEMU 是 JIT（TCG），和上面的解释器不是一个量级，所以单列；同一台机器上对比：
+
+| 负载 | QEMU MIPS | C MIPS | QEMU/C |
+|---|---:|---:|---:|
+| 递归 fib | ~1115（fib(34)） | ~441（fib(28)） | 2.5x |
+| pi（Leibniz） | ~6490 | ~432 | 15x |
+| 冒泡排序 | ~2640 | ~465 | 5.7x |
+| 素数筛 | ~3550 | ~503 | 7.0x |
+
+规律和 Unicorn 那节一致：**循环体越紧、访存越少，JIT 的优势越大**（pi 的 9 条指令
+循环差 15 倍，递归 fib 只有 2.5 倍）。
+
+两个注意点：
+
+- QEMU 自身的启动开销差别很大（乐鑫 9.2.2 的 `fib(0)` 基线约 0.023 s，MSYS2 上游 11.1.3
+  约 0.091 s），所以**必须扣掉各自的基线**再算 MIPS；直接拿进程总时间比会得出完全错误的
+  结论（上游会被“算成”慢 3 倍）。扣掉之后两边基本一致：pi 都是 ~6.6 GIPS，排序 ~2.7 GIPS，
+  筛法 ~3.8 GIPS；只有递归 fib 有差别（上游 ~780、乐鑫 ~1115 MIPS，约 1.4 倍）。
+- 计时用 `-work 15`（fib 用 fib(34)）把运行拉长后再扣基线，短程序（如 9 万条的 pi 单趟）
+  在进程级墙钟上量不出来。
 
 注意：
 
