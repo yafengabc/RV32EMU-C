@@ -3,8 +3,8 @@
 // by the leak drivers, the ASan flavour, the leak drivers and the Go bench
 // generators/tool, on any platform that has gcc (or clang) and Go.
 //
-//   go run ./cmd/rv32emu-build           build everything
-//   go run ./cmd/rv32emu-build emu       only build/rv32emu-c(.exe)
+//	go run ./cmd/rv32emu-build           build everything
+//	go run ./cmd/rv32emu-build emu       only build/rv32emu-c(.exe)
 package main
 
 import (
@@ -239,12 +239,12 @@ func main() {
 		target = os.Args[1]
 	}
 	steps := map[string][]func() error{
-		"emu":  {buildEmulator},
-		"all":  {buildEmulator, buildDLL, buildASan, buildTools, buildGenerators, buildBenchTool},
-		"dll":  {buildDLL},
-		"asan": {buildASan},
+		"emu":   {buildEmulator},
+		"all":   {buildEmulator, buildDLL, buildASan, buildTools, buildGenerators, buildBenchTool},
+		"dll":   {buildDLL},
+		"asan":  {buildASan},
 		"tools": {buildTools},
-		"gen":  {buildGenerators},
+		"gen":   {buildGenerators},
 		"bench": {buildBenchTool},
 	}
 	list, ok := steps[target]

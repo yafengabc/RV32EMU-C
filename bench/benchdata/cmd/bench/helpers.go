@@ -42,13 +42,13 @@ func findRoot() string {
 }
 
 var (
-	root      = findRoot()
-	build     = filepath.Join(root, "build")
-	benchdata = filepath.Join(root, "bench", "benchdata")
-	cExe      = filepath.Join(build, exeName("rv32emu-c"))
-	genbench  = filepath.Join(build, exeName("genbench"))
-	genfib    = filepath.Join(build, exeName("genfib"))
-	genwork   = filepath.Join(build, exeName("genwork"))
+	root           = findRoot()
+	build          = filepath.Join(root, "build")
+	benchdata      = filepath.Join(root, "bench", "benchdata")
+	cExe           = filepath.Join(build, exeName("rv32emu-c"))
+	genbench       = filepath.Join(build, exeName("genbench"))
+	genfib         = filepath.Join(build, exeName("genfib"))
+	genwork        = filepath.Join(build, exeName("genwork"))
 	defaultEspQEMU = filepath.Join(`C:\Users\SONG\Tools\esp-qemu\qemu\bin`, exeName("qemu-system-riscv32"))
 	defaultTinyOS  = filepath.Join(`C:\Users\SONG\Documents\Projects\TinyOS`, "build")
 )

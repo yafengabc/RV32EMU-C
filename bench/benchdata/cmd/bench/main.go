@@ -1,10 +1,10 @@
 // rv32emu-bench - the consolidated benchmark/test driver for rv32emu-c (Go
 // port of the old bench/*.py and compare.ps1 scripts).
 //
-//   rv32emu-bench check    QEMU correctness + timing on esp32c3/virt
-//   rv32emu-bench tinyos   boot TinyOS on the esp32c3 QEMU (TB retranslation)
-//   rv32emu-bench compare  Go vs C emulator throughput table
-//   rv32emu-bench mem      ASan + leak regression
+//	rv32emu-bench check    QEMU correctness + timing on esp32c3/virt
+//	rv32emu-bench tinyos   boot TinyOS on the esp32c3 QEMU (TB retranslation)
+//	rv32emu-bench compare  Go vs C emulator throughput table
+//	rv32emu-bench mem      ASan + leak regression
 package main
 
 import (
