@@ -29,6 +29,6 @@ if ($Native) { $cflags += "-march=native" }
 
 Write-Host "CC  = $cc"
 Write-Host "OUT = $out"
-& $cc @cflags -o $out @src -pthread
+& $cc @cflags -o $out @src
 if ($LASTEXITCODE -ne 0) { throw "build failed" }
 Write-Host "OK"

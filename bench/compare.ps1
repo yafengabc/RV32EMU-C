@@ -56,17 +56,21 @@ if (-not $GoRepo) {
 Write-Host "Go repo: $GoRepo"
 
 # benchrun imports rv32emu/internal/..., which Go only permits from inside the
-# rv32emu module. A scratch module named "rv32emu" is assembled from a copy of
-# the checkout's emulator packages (benchrun --stage), the harness is emitted
-# with its imports pointed at that copy, and `go build` then happens there. The
-# checkout itself is never modified and nothing is added to the Go repository.
+# rv32emu module. A scratch module named "rv32emu" is assembled from an exact
+# copy of the checkout's internal/{cpu,elf,mem,perip,rom} packages plus the
+# harness at tools/benchrun, and `go build` happens there - the Go checkout is
+# never modified and nothing has to be added to the Go repository.
+#
+# The harness is copied verbatim (same import paths, same loop shape) because
+# that is what the Go repository compiles; restructuring it changes codegen and
+# shifts the numbers by a wide margin.
 $genbench = Join-Path $build "genbench.exe"
 $genfib = Join-Path $build "genfib.exe"
 $goBuild = 0
 Push-Location $overlay
 try {
-    go build -o $genbench ./genbench
-    go build -o $genfib ./genfib
+    go build -buildvcs=false -o $genbench ./genbench
+    go build -buildvcs=false -o $genfib ./genfib
     if ($LASTEXITCODE -ne 0) { $goBuild = $LASTEXITCODE }
 }
 finally {
@@ -74,22 +78,36 @@ finally {
 }
 if ($goBuild -eq 0) {
     $stage = Join-Path ([System.IO.Path]::GetTempPath()) ("rv32emu-bench-" + [guid]::NewGuid().ToString("N"))
-    New-Item -ItemType Directory -Force $stage | Out-Null
-    $mod = "module rv32emu`r`ngo 1.22`r`n"
-    [System.IO.File]::WriteAllText((Join-Path $stage "go.mod"), $mod)
-    New-Item -ItemType Directory -Force (Join-Path $stage "zh") | Out-Null
-    Copy-Item (Join-Path $overlay "benchrun\main.go") (Join-Path $stage "zh\main.go") -Force
-    Push-Location $stage
+    $toolsDir = Join-Path $stage "tools\benchrun"
+    New-Item -ItemType Directory -Force $toolsDir | Out-Null
     try {
-        go run ./zh --stage $GoRepo $stage
-        $goBuild = $LASTEXITCODE
-        if ($goBuild -eq 0) {
-            go build -o $goBench ./benchenv/internal/benchrun
+        $goDirective = "go 1.22"
+        $repoMod = Join-Path $GoRepo "go.mod"
+        if (Test-Path $repoMod) {
+            $m = Select-String -Path $repoMod -Pattern '^go\s+(.+)$' | Select-Object -First 1
+            if ($m) { $goDirective = "go " + $m.Matches[0].Groups[1].Value.Trim() }
+        }
+        $mod = "module rv32emu`r`n`r`n$goDirective`r`n"
+        [System.IO.File]::WriteAllText((Join-Path $stage "go.mod"), $mod)
+        foreach ($pkg in @("cpu", "elf", "mem", "perip", "rom")) {
+            $from = Join-Path (Join-Path $GoRepo "internal") $pkg
+            if (-not (Test-Path $from)) {
+                throw "missing emulator package: $from (is -GoRepo a checkout of RV32EMU?)"
+            }
+            Copy-Item $from (Join-Path $stage "internal\$pkg") -Recurse -Force
+        }
+        Copy-Item (Join-Path $overlay "benchrun\main.go") (Join-Path $toolsDir "main.go") -Force
+        Push-Location $stage
+        try {
+            # the scratch module is outside any VCS, so stamping has to be off
+            go build -buildvcs=false -o $goBench ./tools/benchrun
             $goBuild = $LASTEXITCODE
+        }
+        finally {
+            Pop-Location
         }
     }
     finally {
-        Pop-Location
         Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
     }
 }

@@ -9,6 +9,7 @@
 ```
 rv32emu-c/
 ├─ build.ps1                  Windows 一键编译
+├─ build_asan.ps1             ASan 版本（clang -fsanitize=address + lld）
 ├─ Makefile                   make 环境
 ├─ src/
 │  ├─ rv32.h                  公共类型、地址映射、接口
@@ -20,13 +21,16 @@ rv32emu-c/
 │  ├─ elf.c                   ELF32 / raw bin 加载
 │  ├─ disasm.c                -trace 用的反汇编
 │  └─ main.c                  CLI、machine、软件复位、bench 模式
+├─ tools/                     泄漏 / 会话测试驱动（Windows）
 └─ bench/
    ├─ compare.ps1             Go vs C 自动对比（-IncludeTinyOS / -IncludeUnicorn）
+   ├─ go-repo.txt             Go 仓库路径（默认 ../RV32EMU）
+   ├─ benchdata/              Go 侧计时器 + fib/pi/sort/sieve ELF 生成器
    ├─ gen_workloads.py        pi / ALU / memory 负载
-   ├─ bench_unicorn.c          Unicorn 2.1.4 的 C 侧对照与直线代码测速
-   ├─ bench_unicorn.py         Unicorn 探针（Python 绑定）
-   ├─ README.md               Unicorn 对比的复现方法与结论
-   └─ results.md              最近一次结果
+   ├─ bench_unicorn.c/.py     Unicorn 2.1.4 对照与直线代码测速
+   ├─ asan_test.py / memcheck.py / leak_test.py
+   ├─ README.md               计时口径与 Unicorn 复现结论
+   └─ results.md              compare.ps1 生成的最近一次结果（已在 .gitignore）
 ```
 
 两个前提：
@@ -65,7 +69,7 @@ make
 手工命令：
 
 ```powershell
-gcc -std=c11 -O3 -DNDEBUG -flto -o build/rv32emu-c.exe src/*.c -pthread
+gcc -std=c11 -O3 -DNDEBUG -flto -o build/rv32emu-c.exe src/*.c
 ```
 
 ## 运行
@@ -114,21 +118,30 @@ gcc -std=c11 -O3 -DNDEBUG -flto -o build/rv32emu-c.exe src/*.c -pthread
 
 | 负载 | 执行指令数 | Go MIPS | C MIPS | C/Go |
 |---|---:|---:|---:|---:|
-| fib(28) 递归 | 15,426,855 | 388.35 | 488.04 | 1.26x |
-| pi（Leibniz，含 M 扩展） | 2,000,000 | 543.64 | 572.54 | 1.05x |
-| ALU 紧循环 | 2,000,000 | 528.25 | 607.68 | 1.15x |
-| 内存读写循环 | 2,000,000 | 133.62 | 174.82 | 1.31x |
-| 冒泡排序循环 | 20,000,000 | 106.60 | 139.18 | 1.31x |
-| 素数筛循环 | 20,000,000 | 173.71 | 246.89 | 1.42x |
-| TinyOS 启动到 shell | 5,000,000 | 342.93 | 440.40 | 1.28x |
+| fib(28) 递归 | 15,426,855 | ~383 | ~442 | 1.15x |
+| pi（Leibniz，含 M 扩展除法） | 2,000,000 | ~532 | ~548 | 1.03x |
+| ALU 紧循环 | 2,000,000 | ~531 | ~567 | 1.07x |
+| 内存读写循环 | 2,000,000 | ~131 | ~159 | 1.22x |
+| 冒泡排序循环 | 20,000,000 | ~105 | ~134 | 1.28x |
+| 素数筛循环 | 20,000,000 | ~172 | ~231 | 1.35x |
+| TinyOS 启动到 shell | 5,000,000 | ~348 | ~412 | 1.19x |
 
 结论：
 
-- C 版在全部负载上都快 **1.05x ~ 1.42x**，没有出现某一类负载反而变慢的情况。
-- **纯 ALU/分支**（ALU loop、fib）C 快约 25~30%：Go 的块解释器已经编译得很好，C 的优势主要来自更直接的结构体数组访问和更少的边界/接口开销。
-- **访存 + 分支**（内存循环、冒泡、筛法）C 快约 31~42%：每次 load/store 都要走 `priv/PMP/平铺区` 判断，C 生成的代码更紧凑。
-- **真实系统负载**（TinyOS 启动，含 U-mode、PMP、timer 中断、UART）C 快约 28%，说明外围和异常路径也没有把优势吃掉。
-- 紧循环用 2M 指令预算计量：Go/C 都需要 `-max` 才能离开死循环。这类短负载抖动最大——同一二进制连跑 5 次，Go 在 499~555 MIPS（ALU）/ 499~544 MIPS（pi）、C 在 578~641 / 570~586 之间波动，所以表里 pi 的 1.05x 不代表稳定差距，但 **C 在每一次运行里都更快**；20M 的长循环最稳定（ALU：C 62.3 vs Go 46.6 MIPS，1.34x）。fib、排序、筛法、TinyOS 是自终止程序：200 次重复、2M/20M 两种预算下比值都稳定在 ±0.05。
+- 总体 **1.03x ~ 1.35x**，没有哪类负载出现 C 反而更慢；但纯 ALU / 除法循环已经基本追平。
+- **访存 + 分支**（内存循环、冒泡、筛法）差距最大，约 22%~35%：每次 load/store 都要过
+  `priv`/PMP/平铺区判断，C 生成的代码更紧凑。
+- **纯 ALU / 除法**（pi、ALU loop）约 3%~8%：Go 的块解释器把位域解析摊掉之后，一个块里
+  几乎没有额外开销。fib 的递归压栈/出栈让 C 领先约 15%。
+- **真实系统负载**（TinyOS 启动，含 U-mode、PMP、timer 中断、UART）约 17%：外围和异常
+  路径既没有把优势吃掉，也没有额外放大。
+- 抖动不小：同一个二进制连跑 5 次，Go 在 pi 上是 485~546 MIPS、筛法是 158~173、TinyOS
+  是 285~357；C 在 pi 上是 538~549。表里是四次完整对比的中位数，比值按区间看。20M 长循环
+  （排序、筛法）和自终止的 fib 相对稳定，但也受主机温度/后台负载影响。
+- **计时器必须与 Go 仓库 `tools/benchrun/main.go` 逐字节一致**（`bench/benchdata/benchrun`
+  就是这份拷贝）。曾经把热循环包成 `measure()` → `measureBody()` 两层函数再编译，Go 侧
+  直接慢 **1.7 倍**，算出来的倍数全是假的——循环的结构会改变 Go 的内联/逃逸分析结果。
+- 这些数字会随主机状态漂移；跨机器只比倍数，不比绝对值。
 
 ### 与 Unicorn 2.1.4 的对比
 
@@ -149,8 +162,8 @@ gcc -std=c11 -O3 -DNDEBUG -flto -o build/rv32emu-c.exe src/*.c -pthread
 能正常跑的只有**单页内的直线代码**：`bench/bench_unicorn.py` 计时 16000 条 `nop`，
 无 hook 约 0.018 s、带 `UC_HOOK_CODE` 约 0.021 s（这 16k 条里 Python 的 `emu_start`
 调用开销占了大头，但已经说明在同样的「每条指令都要记一次数」口径下，JIT 并不占便宜；
-C 侧同样 16000 条约 0.000028 s）。Go 版 README 里 Unicorn 在真实算法上只快 2 倍，
-也是同一个原因——JIT 的优势被访存和分支稀释。详细复现方法见 `bench/README.md`。
+C 侧同样 16000 条约 0.000028 s）。早期几个 README 里「Unicorn 快 13.8x / 2.0x」的数字来自另一台机器、另一版 Unicorn，
+本仓库复现不出来，已从 Go 版 README 撤下。详细复现方法见 `bench/README.md`。
 
 复现：
 
@@ -160,6 +173,28 @@ cd rv32emu-c
 ```
 
 脚本会编译两边、生成 `fib/pi/alu/mem/sort/sieve` ELF，输出表格并写入 `bench/results.md`。
+
+## 边界
+
+与 Go 版对齐的语义边界（完整列表见 Go 仓库 README 的「当前边界」），以及 C 版特有的部分：
+
+- **指令集**：RV32IMC（I/M/C）。没有 F/D，没有 A —— 原子指令按非法指令 trap。
+- **固件布局**：只支持扁平链接、从 `0x40000000` 执行的镜像。ESP-IDF 默认的 `0x42000000`
+  指令别名和 `0x3C000000` 数据别名没有建模，这类镜像要先重链接（TinyOS 是扁平链接的）。
+- **外设**：只覆盖 TinyOS 用到的 UART0 / GPIO 影子 / TIMG0 / INTMTX（被动影子）/ SPI1 扇区
+  擦除 / USJ（黑洞）/ RTC_CNTL（被动）。**UART 接收中断没有建模**，输入走内核的 tick 轮询
+  兜底；没有看门狗、deep sleep、USB-Serial-JTAG 协议。未建模地址读 0、写丢弃并按地址
+  去重告警。
+- **时序**：tick 是「每 N 条指令」而不是墙钟量，单条指令耗时均匀；没有总线竞争、cache、
+  flash 等待周期。`-tickdiv` 用来做时序敏感性实验——TinyOS 的 `sched_switch` 竞态就是
+  这样复现的。
+- **没有 GDB stub**：调试靠 `-traplog` / `-breakpc` / `-dumpram` / `-step` 这套快照工具。
+  比 Go 版少的调试开关见上面「已支持的参数」下的说明。
+- **控制台 / 平台**：控制台有 Win32 与 POSIX 两条实现，模拟器本体在 Linux 也能编译；
+  `tools/leakrun.c`、`tools/leakunit.c` 是 Windows 专用（用 `GetProcessMemoryInfo` 读工作集
+  和私有内存），非 Windows 环境跳过。
+- **内存所有权**：没有 GC。`bus_new`/`cpu_new`/各设备各自持有资源，`_run` 结束或
+  `_shutdown` 时必须释放；对应的泄漏检查在下一节。
 
 ## 内存管理 / 泄漏检查
 
@@ -191,6 +226,7 @@ Windows 上没有 LeakSanitizer，未释放的内存用泄漏驱动里的数字�
 
 ## 备注
 
-- UART 接收用后台线程 + 环形缓冲模拟 Go 版的 goroutine；复位只清芯片侧 RX FIFO，主机侧预输入保留。
-- 编译需要 pthread。MSYS2 UCRT64 的 `gcc -pthread` 可直接使用；Linux 同样。
+- UART 接收是**轮询**，不是后台线程：`console_input()` 每个批次从控制台/管道/标准输入读一次，
+  再按水位压进 128 字节 FIFO。复位只清芯片侧 RX FIFO，主机侧预输入保留（与真机一致）。
+- 不需要 pthread：UART 接收改成轮询之后，代码里没有任何线程 API。
 - 生成物（`build/`、`*.elf`）已在 `.gitignore` 中排除。

@@ -27,13 +27,21 @@ script looks for it (in this order) at `-GoRepo <path>`, the path in
 (`RV32EMU/rv32emu-c` or a sibling `RV32EMU/`). Default is `../RV32EMU` relative
 to `bench/`, i.e. a C clone placed inside the Go repository.
 
-`benchrun` lives in `benchdata/` together with its own build recipe: on each run
-the script copies the emulator's `internal/{cpu,elf,mem,perip,rom}` packages
-into a scratch Go module named `rv32emu`, emits the harness with its imports
-pointed at those copies (`benchrun --stage`) and builds it there. The Go
-checkout is never modified, so it can stay read-only and the harness always
-matches the revision in the checkout - build both sides from the same commit
-when comparing, otherwise the numbers mix versions.
+`benchrun` lives in `benchdata/benchrun/main.go` and is a verbatim copy of the
+Go repository's `tools/benchrun/main.go`. On each run the script:
+
+1. creates a scratch directory with a `go.mod` that says `module rv32emu`,
+2. copies the checkout's `internal/{cpu,elf,mem,perip,rom}` packages into it,
+3. copies the harness to `tools/benchrun/main.go`, and
+4. runs `go build -buildvcs=false ./tools/benchrun` there.
+
+The Go checkout is never modified, so it can stay read-only, and the harness
+always matches the revision in the checkout. Build both sides from the same
+commit when comparing, otherwise the numbers mix versions.
+
+Keep the harness byte-identical to `tools/benchrun/main.go`: restructuring the
+hot loop (for example wrapping it in `measure()`/`measureBody()` helpers) makes
+the Go side about 1.7x slower and inflates every ratio in the table.
 
 ## Unicorn 2.1.4: not usable for these workloads
 

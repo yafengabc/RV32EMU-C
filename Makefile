@@ -1,7 +1,6 @@
 CC      ?= gcc
 CFLAGS  ?= -std=c11 -O3 -DNDEBUG -flto -Wall -Wextra
 LDFLAGS ?= -flto
-LDLIBS  ?= -pthread
 
 SRC := $(wildcard src/*.c)
 HDR := $(wildcard src/*.h)
@@ -17,13 +16,13 @@ all: $(BIN)
 
 $(BIN): $(SRC) $(HDR)
 	@mkdir -p build
-	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDFLAGS)
 
 debug: CFLAGS := -std=c11 -O0 -g3 -Wall -Wextra
 debug: LDFLAGS :=
 debug: $(SRC) $(HDR)
 	@mkdir -p build
-	$(CC) $(CFLAGS) -o build/rv32emu-c-debug$(if $(filter Windows_NT,$(OS)),.exe,) $(SRC) $(LDLIBS)
+	$(CC) $(CFLAGS) -o build/rv32emu-c-debug$(if $(filter Windows_NT,$(OS)),.exe,) $(SRC)
 
 clean:
 	rm -rf build
