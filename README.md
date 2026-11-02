@@ -197,6 +197,11 @@ TinyOS 要按真机布局拼一个 4 MiB flash 镜像（kernel 在 0、littlefs 
 python bench\tinyos_qemu.py      # 拼 flash 镜像、启动、计时
 ```
 
+这也是这个项目最初被写出来的原因：TinyOS 在 QEMU 上跑基准时频繁超时，最后定位到
+TCG 在 `memcpy` 这类循环上性能劣化 100 多倍——clang 生成的指令序列落在了 TCG 的低效
+路径上。上面 25~360 倍的实测就是同一个现象的复现。所以 TinyOS 的速度数据只能由自己的
+解释器 / C 移植给出，QEMU 仅用于功能对照。
+
 ## 速度对比
 
 计时口径：**只计 `RunHot(1000)` 批次 + TIMG0 tick**，不含进程启动、ELF 加载、终端输出；每个负载跑 7 次取中位数。Go 侧用 `bench/benchdata/benchrun`（与 Go 仓库 `tools/benchrun` 同一份源码），C 侧用 `-bench`，两边是同一套批次循环。
