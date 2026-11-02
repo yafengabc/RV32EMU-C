@@ -28,7 +28,8 @@ rv32emu-c/
    ├─ benchdata/              Go 侧计时器 + fib/pi/sort/sieve ELF 生成器
    ├─ gen_workloads.py        pi / ALU / memory 负载
    ├─ bench_unicorn.c/.py     Unicorn 2.1.4 对照与直线代码测速
-   ├─ qemu_check.py           QEMU 结果校验（乐鑫 esp32c3 / 上游 virt）
+   ├─ qemu_check.py           QEMU 结果校验与测速（乐鑫 esp32c3 / 上游 virt）
+   ├─ tinyos_qemu.py          TinyOS 在 esp32c3 QEMU 上的启动/耗时复现
    ├─ asan_test.py / memcheck.py / leak_test.py
    ├─ README.md               计时口径与 Unicorn 复现结论
    └─ results.md              compare.ps1 生成的最近一次结果（已在 .gitignore）
@@ -172,8 +173,29 @@ QEMU 是 JIT（TCG），和上面的解释器不是一个量级，所以单列�
   计算部分与 rv32emu 的镜像逐条相同，只换出口。
 - `esp32c3` 机器只实现 384 KiB DRAM（到 `0x3FCDFFFF`），所以栈放在 `0x3FCDF000`。
   rv32emu 按 512 KiB 窗口建模，`0x3FCFF000` 也能用——真机/QEMU 不行。
-- TinyOS 依赖 C3 的 flash/ROM 布局和 littlefs 分区，要跑得先按 esp-idf 的方式生成 flash 镜像，
-  不在本仓库的校验范围内。
+### TinyOS：能启动，但 QEMU 上不要看性能
+
+TinyOS 要按真机布局拼一个 4 MiB flash 镜像（kernel 在 0、littlefs 在 `0x100000`），
+再用 `-drive file=flash.bin,if=mtd,format=raw` 启动；直接用 `-kernel` 加载 ELF 会在 ROM 区
+跑飞（`illegal instruction @0x40000134`）。
+
+功能是通的（0.22 s 到 `tos>`，命令、文件系统都正常），但执行速度不可用：
+
+| 操作 | rv32emu（Go/C） | 乐鑫 QEMU 9.2.2 |
+|---|---:|---:|
+| 启动到 `tos>` | 0.014 s | 0.22 s |
+| `bench 1024 4`（4 KiB 拷贝） | 8 ms | 201 ms |
+| `bench`（默认 256 KiB 拷贝） | 25 ms | 9.1 s |
+
+内存 / SPI flash 路径慢 25~360 倍，而且随数据量非线性恶化；这是 QEMU 的 esp32c3 机器模型
+（cache / SPI flash 模拟）的问题，不是 TinyOS 的。所以 QEMU 只用来做功能校验（能启动、
+能跑命令），速度对比仍然以 rv32emu 和本 C 版为准。
+
+复现：
+
+```powershell
+python bench\tinyos_qemu.py      # 拼 flash 镜像、启动、计时
+```
 
 ## 速度对比
 

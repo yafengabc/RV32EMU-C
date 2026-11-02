@@ -6,7 +6,8 @@ the same RISC-V binaries.
 ```
 gen_workloads.py    alu_loop / mem_loop / pi_big (Go vs C numbers)
 compare.ps1         builds both, runs them, writes results.md
-qemu_check.py       runs fib/pi/sort/sieve on QEMU and verifies the results
+qemu_check.py       runs fib/pi/sort/sieve on QEMU, verifies and times them
+tinyos_qemu.py      boots TinyOS from a flash image on esp32c3 and times bench
 go-repo.txt         where the Go emulator (RV32EMU) checkout lives
 benchdata/          Go sources compiled for the run:
   benchrun/           timing harness (same loop as the Go emulator's main.go)
@@ -81,6 +82,13 @@ the recursive fib differs (upstream ~780 vs Espressif ~1115 MIPS).
 The C3 machine implements 384 KiB of DRAM (up to 0x3FCDFFFF), so the stack is
 placed at 0x3FCDF000. rv32emu models a 512 KiB window and also accepts
 0x3FCFF000; real hardware and QEMU do not.
+
+TinyOS on the same machine: `tinyos_qemu.py` builds a real flash image (kernel
+at 0, littlefs at 0x100000) and boots it with `-drive file=...if=mtd`; `-kernel`
+crashes in the ROM area. It reaches `tos>` in ~0.22 s and works, but the C3
+memory/SPI-flash path is pathologically slow: `bench 1024 4` takes ~200 ms and
+the default 256 KiB `bench` ~9.1 s, versus 8 ms / 25 ms on rv32emu. That is a
+QEMU machine-model problem, so QEMU is used for functional checks only.
 
 ## Unicorn 2.1.4: not usable for these workloads
 
