@@ -18,15 +18,42 @@
 
 bool g_quiet = false;
 
+/* Host wall clock in nanoseconds.  The guest's TIMG is driven by this (see
+ * opt_clk_inst), because a real chip's timer runs off a crystal, not off the
+ * number of instructions executed. */
+static uint64_t host_ns(void) {
+#ifdef _WIN32
+    static LARGE_INTEGER freq;
+    static int init = 0;
+    if (!init) {
+        QueryPerformanceFrequency(&freq);
+        init = 1;
+    }
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return (uint64_t)((t.QuadPart * 1000000000ull) / freq.QuadPart);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+#endif
+}
+
 /* ---- command line --------------------------------------------------- */
 
 static const char *opt_elf = NULL;
 static const char *opt_bin = NULL;
+static const char *opt_flashimg = NULL;
 static const char *opt_ramdisk = NULL;
+static uint32_t opt_ramdisk_off = 0x80000u; /* ramdisk load offset in flash */
 static uint32_t opt_entry = RESET_VECTOR;
 static uint64_t opt_max = 0;
 static uint64_t opt_step = 0;
 static int opt_tickdiv = 1;
+/* 1 = one timer count per executed instruction (the default, matching the Go
+ * build: runs are exactly reproducible and piped stdin lines up with -rxdelay),
+ * 0 = drive the guest timer from the host wall clock (-clk wall). */
+static int opt_clk_inst = 1;
 static int opt_rxrate = 16;
 static uint64_t opt_rxperiod = 10000;
 static uint64_t opt_rxdelay = 0;
@@ -46,11 +73,15 @@ void usage(const char *argv0) {
     printf("usage: %s [options]\n", argv0);
     printf("  -elf FILE        load RV32 ELF\n");
     printf("  -bin FILE        load raw binary\n");
+    printf("  -flashimg FILE   raw SPI flash image: boot the app found by\n");
+    printf("                   its partition table (MicroPython / ESP-IDF)\n");
     printf("  -entry ADDR      load/entry base for -bin (default 0x40000000)\n");
-    printf("  -ramdisk FILE    littlefs image placed at flash+0x100000\n");
+    printf("  -ramdisk FILE    littlefs image placed at flash+0x%X (override: -ramdiskoff ADDR)\n",
+           opt_ramdisk_off);
     printf("  -max N           stop after N instructions (0 = until halt)\n");
     printf("  -step N          execute N instructions then dump registers\n");
     printf("  -tickdiv N       stretch the TIMG0 period by N\n");
+    printf("  -clk wall        drive the timer from the host clock (default: instruction count)\n");
     printf("  -nopmp           disable PMP enforcement in U-mode\n");
     printf("  -traplog         log synchronous traps\n");
     printf("  -trace           print every instruction\n");
@@ -81,11 +112,14 @@ static int set_option(const char *a, const char *v) {
     }
     if (!strcmp(a, "elf")) opt_elf = v;
     else if (!strcmp(a, "bin")) opt_bin = v;
+    else if (!strcmp(a, "flashimg")) opt_flashimg = v;
     else if (!strcmp(a, "ramdisk")) opt_ramdisk = v;
+    else if (!strcmp(a, "ramdiskoff")) opt_ramdisk_off = (uint32_t)parse_u64(v);
     else if (!strcmp(a, "entry")) opt_entry = (uint32_t)parse_u64(v);
     else if (!strcmp(a, "max")) opt_max = parse_u64(v);
     else if (!strcmp(a, "step")) opt_step = parse_u64(v);
     else if (!strcmp(a, "tickdiv")) opt_tickdiv = (int)parse_u64(v);
+    else if (!strcmp(a, "clk")) opt_clk_inst = strcmp(v, "wall") != 0;
     else if (!strcmp(a, "rxrate")) opt_rxrate = (int)parse_u64(v);
     else if (!strcmp(a, "rxperiod")) opt_rxperiod = parse_u64(v);
     else if (!strcmp(a, "rxdelay")) opt_rxdelay = parse_u64(v);
@@ -107,11 +141,14 @@ static int set_option(const char *a, const char *v) {
 static void reset_options(void) {
     opt_elf = NULL;
     opt_bin = NULL;
+    opt_flashimg = NULL;
     opt_ramdisk = NULL;
+    opt_ramdisk_off = 0x80000u;
     opt_entry = RESET_VECTOR;
     opt_max = 0;
     opt_step = 0;
     opt_tickdiv = 1;
+    opt_clk_inst = 1;
     opt_rxrate = 16;
     opt_rxperiod = 10000;
     opt_rxdelay = 0;
@@ -256,7 +293,17 @@ typedef struct {
     gpio_t *gpio;
     usj_t *usj;
     c3intc_t *intc;
-    c3spi1_t *spi1;
+    c3systimer_t *systimer;
+    c3efuse_t *efuse;
+    c3adc_t *adc;
+    c3extras_t *extras;
+    c3spi_t *spi0;
+    c3spi_t *spi1;
+    flashmmu_t *mmu;
+    c3cache_t *cache;
+    c3xip_t *drom;
+    c3xip_t *irom;
+    rom_service_t *rom;
 } machine_t;
 
 static void trap_logger(uint32_t cause, uint32_t epc, uint32_t tval) {
@@ -291,13 +338,18 @@ static machine_t *machine_new(const uint8_t *flash, uart_t *uart) {
     m->usj = usj_new();
     m->rtc = rtc_new();
     m->intc = c3intc_new();
+    m->systimer = c3systimer_new();
+    m->efuse = c3efuse_new();
+    m->adc = c3adc_new();
     m->uart = uart;
 
     perip_attach_uart(m->bus, uart);
     perip_attach_gpio(m->bus, m->gpio);
+    perip_attach_iomux(m->bus, m->gpio);
     perip_attach_usj(m->bus, m->usj);
     perip_attach_rtc(m->bus, m->rtc);
     perip_attach_intc(m->bus, m->intc);
+    uart_set_intc(uart, m->intc);
 
     bus_add_ram(m->bus, FLASH_EMU_BASE, FLASH_SIZE);
     bus_copy_into(m->bus, FLASH_EMU_BASE, 0, flash, FLASH_SIZE);
@@ -307,16 +359,37 @@ static machine_t *machine_new(const uint8_t *flash, uart_t *uart) {
     bus_load_rom(m->bus, 0, rom, ROM_SIZE);
     free(rom);
 
+    rom_service_load_rom_data(m->bus);
+
     m->timer = c3timer_new(NULL);
-    m->spi1 = c3spi1_new(m->bus, FLASH_EMU_BASE);
+    m->spi1 = c3spi_new(m->bus, FLASH_EMU_BASE, "C3SPI1");
+    m->spi0 = c3spi_new(m->bus, FLASH_EMU_BASE, "C3SPI0");
     perip_attach_timer(m->bus, m->timer);
-    perip_attach_spi1(m->bus, m->spi1);
+    perip_attach_systimer(m->bus, m->systimer);
+    perip_attach_efuse(m->bus, m->efuse);
+    perip_attach_adc(m->bus, m->adc);
+    perip_attach_spi(m->bus, m->spi1, 0x60002000u);
+    perip_attach_spi(m->bus, m->spi0, 0x60003000u);
+    m->extras = c3extras_new(m->bus, m->intc);
+
+    /* Flash cache / XIP must be attached before any ELF or image load: the
+     * DROM/IROM windows hold the overlay the loader writes. */
+    m->mmu = flashmmu_new(m->bus, FLASH_EMU_BASE, FLASH_SIZE);
+    m->cache = c3cache_new(m->mmu);
+    m->drom = c3xip_new(m->mmu, DROM_BASE, "DROM");
+    m->irom = c3xip_new(m->mmu, IROM_BASE, "IROM");
+    perip_attach_cache(m->bus, m->cache);
+    perip_attach_xip(m->bus, m->drom);
+    perip_attach_xip(m->bus, m->irom);
 
     m->cpu = cpu_new(m->bus);
     cpu_set_pmp_enforce(m->cpu, !opt_nopmp);
     if (opt_traplog) m->cpu->on_trap = trap_logger;
     c3timer_set_cpu(m->timer, m->cpu);
     c3timer_set_div(m->timer, (uint32_t)opt_tickdiv);
+    c3timer_set_intc(m->timer, m->intc);
+    c3systimer_set_intc(m->systimer, m->intc);
+    c3intc_set_cpu(m->intc, m->cpu);
 
     if (opt_elf && opt_elf[0]) {
         uint32_t entry = elf_load(opt_elf, m->bus);
@@ -333,10 +406,28 @@ static machine_t *machine_new(const uint8_t *flash, uart_t *uart) {
             return NULL;
         }
         cpu_set_pc(m->cpu, opt_entry);
+    } else if (opt_flashimg && opt_flashimg[0]) {
+        uint32_t entry = 0;
+        if (!image_load_app(flash, FLASH_SIZE, m->bus, m->mmu, &entry)) {
+            fprintf(stderr, "load flash image failed\n");
+            machine_free(m);
+            return NULL;
+        }
+        cpu_set_pc(m->cpu, entry);
     } else {
-        fprintf(stderr, "need -elf or -bin\n");
+        fprintf(stderr, "need -elf, -bin or -flashimg\n");
         machine_free(m);
         return NULL;
+    }
+
+    /* The ESP-IDF app entry assumes a bootloader already set up a stack.
+     * 0x3FCDE000 sits at the top of DRAM, below nothing the app reserves. */
+    m->cpu->x[2] = 0x3FCDE000u;
+
+    m->rom = rom_service_new(m->bus, uart);
+    if (m->rom) {
+        m->cpu->rom_call = (void (*)(void *, cpu_t *, uint32_t))rom_service_call;
+        m->cpu->rom_ctx = m->rom;
     }
     return m;
 }
@@ -345,12 +436,22 @@ static void machine_free(machine_t *m) {
     if (!m) return;
     cpu_free(m->cpu);
     bus_free(m->bus);
+    rom_service_free(m->rom);
+    c3extras_free(m->extras);
+    c3xip_free(m->drom);
+    c3xip_free(m->irom);
+    c3cache_free(m->cache);
+    flashmmu_free(m->mmu);
+    c3spi_free(m->spi0);
+    c3spi_free(m->spi1);
+    c3adc_free(m->adc);
+    c3efuse_free(m->efuse);
+    c3systimer_free(m->systimer);
+    c3timer_free(m->timer);
+    c3intc_free(m->intc);
     gpio_free(m->gpio);
     usj_free(m->usj);
     rtc_free(m->rtc);
-    c3intc_free(m->intc);
-    c3timer_free(m->timer);
-    c3spi1_free(m->spi1);
     free(m);
 }
 
@@ -402,6 +503,14 @@ static bool machine_run(machine_t *m) {
         printf("=== RV32EMU start pc=0x%08X ===\n", c->pc);
     }
     uint64_t n = 0;
+    /* Wall-clock mode (-clk wall): TIMG0 counts microseconds of host time.
+     * The remainder is carried between batches so a 1000-instruction batch
+     * that takes less than a microsecond still adds up instead of truncating
+     * to zero. */
+    uint64_t clk_prev = host_ns();
+    uint64_t clk_rem_ns = 0;
+    /* Carries sub-8 remainders when SYSTIMER is folded in single-step mode. */
+    uint64_t sys_acc = 0;
     while (!c->halted && (limit == 0 || n < limit)) {
         if (g_console_up) {
             (void)console_input();
@@ -431,7 +540,36 @@ static bool machine_run(machine_t *m) {
             ran = 1;
         }
         if (ran == 0) break;
-        c3timer_tick_n(m->timer, ran);
+        if (opt_clk_inst) {
+            /* One timer count per instruction: the old behaviour, and the
+             * one to use when a run has to be exactly reproducible. */
+            c3timer_tick_n(m->timer, ran);
+            /* Single-stepping would advance SYSTIMER once per instruction, so
+             * the firmware's "read VAL_LO twice and wait for the same value"
+             * loop would never settle (two reads are only four instructions
+             * apart).  Fold eight instructions into one count, as the Go build
+             * does; a batch already ticks once per batch. */
+            if (bulk) {
+                c3systimer_tick_n(m->systimer, ran);
+            } else {
+                sys_acc += ran;
+                if (sys_acc >= 8) {
+                    c3systimer_tick_n(m->systimer, sys_acc / 8);
+                    sys_acc %= 8;
+                }
+            }
+            rtc_tick(m->rtc, ran);
+        } else {
+            /* Real clock: a crystal does not care how many instructions
+             * retired, so neither does the emulated TIMG/SYSTIMER. */
+            uint64_t t = host_ns();
+            uint64_t d = (t - clk_prev) + clk_rem_ns;
+            clk_prev = t;
+            clk_rem_ns = d % 1000u;
+            c3timer_tick_n(m->timer, d / 1000u);
+            c3systimer_tick_n(m->systimer, d / 1000u);
+            rtc_tick(m->rtc, d / 1000u);
+        }
 
         if (g_console_up) {
             /* The terminal owns the UART: bytes arrive through console_input()
@@ -461,13 +599,18 @@ static bool machine_run(machine_t *m) {
         if (g_console_up) console_tick(sim_ms);
         if (!g_console_up) uart_flush(m->uart);
 
-        if (rtc_reset_pending(m->rtc)) {
+        if (rtc_reset_pending(m->rtc) ||
+            rtc_wdt_reset_pending(m->rtc) ||
+            c3timer_wdt_reset_pending(m->timer)) {
+            bool wdt = rtc_wdt_reset_pending(m->rtc) ||
+                       c3timer_wdt_reset_pending(m->timer);
             if (g_console_up) {
-                console_write("\r\n[software reset]\r\n",
-                              strlen("\r\n[software reset]\r\n"));
+                console_write("\r\n[reset]\r\n", strlen("\r\n[reset]\r\n"));
             } else {
-                printf("\n=== software reset after %" PRIu64
-                       " inst (RTC_CNTL SW_SYS_RST) ===\n", n);
+                printf("\n=== %s after %" PRIu64 " inst ===\n",
+                       wdt ? "watchdog reset"
+                           : "software reset (RTC_CNTL SW_SYS_RST)",
+                       n);
             }
             uart_reset(m->uart);
             m->rtc->reset = false;
@@ -550,13 +693,28 @@ int main(int argc, char **argv) {
     int pr = parse_args(argc, argv);
     if (pr != 0) return pr > 0 ? 0 : 2;
 
-    if (!opt_elf && !opt_bin) {
+    if (!opt_elf && !opt_bin && !opt_flashimg) {
         usage(argv[0]);
         return 2;
     }
 
-    uint8_t *flash = (uint8_t *)calloc(FLASH_SIZE, 1);
+    uint8_t *flash = (uint8_t *)malloc(FLASH_SIZE);
     if (!flash) return 1;
+    /* Erased SPI flash reads 0xFF; the app and LittleFS both rely on that. */
+    memset(flash, 0xFF, FLASH_SIZE);
+    if (opt_flashimg && opt_flashimg[0]) {
+        uint32_t img_len = 0;
+        uint8_t *img = load_file(opt_flashimg, &img_len);
+        if (!img) {
+            fprintf(stderr, "load flash image failed: %s\n", opt_flashimg);
+            free(flash);
+            return 1;
+        }
+        if (img_len > FLASH_SIZE) img_len = FLASH_SIZE;
+        memcpy(flash, img, img_len);
+        if (!g_quiet) printf("[flash] image %u bytes\n", img_len);
+        free(img);
+    }
     if (opt_ramdisk && opt_ramdisk[0]) {
         uint32_t rd_len = 0;
         uint8_t *rd = load_file(opt_ramdisk, &rd_len);
@@ -565,7 +723,7 @@ int main(int argc, char **argv) {
             free(flash);
             return 1;
         }
-        const uint32_t flash_off = 0x100000u;
+        const uint32_t flash_off = opt_ramdisk_off;
         if (rd_len > FLASH_SIZE - flash_off) rd_len = FLASH_SIZE - flash_off;
         memcpy(flash + flash_off, rd, rd_len);
         if (!g_quiet)
@@ -701,15 +859,28 @@ static void release_vm(void) {
 /* Run one guest session; `brief` keeps stdout to the CLI banner rules. */
 static int vm_session(bool brief, char *out, size_t cap) {
     (void)brief;
-    if (!opt_elf && !opt_bin) {
-        set_error("need -elf or -bin");
+    if (!opt_elf && !opt_bin && !opt_flashimg) {
+        set_error("need -elf, -bin or -flashimg");
         return 2;
     }
 
-    g_flash = (uint8_t *)calloc(FLASH_SIZE, 1);
+    g_flash = (uint8_t *)malloc(FLASH_SIZE);
     if (!g_flash) {
         set_error("out of memory for the flash image");
         return 1;
+    }
+    memset(g_flash, 0xFF, FLASH_SIZE);
+    if (opt_flashimg && opt_flashimg[0]) {
+        uint32_t img_len = 0;
+        uint8_t *img = load_file(opt_flashimg, &img_len);
+        if (!img) {
+            set_error("load flash image failed: %s", opt_flashimg);
+            release_vm();
+            return 1;
+        }
+        if (img_len > FLASH_SIZE) img_len = FLASH_SIZE;
+        memcpy(g_flash, img, img_len);
+        free(img);
     }
     if (opt_ramdisk && opt_ramdisk[0]) {
         uint32_t rd_len = 0;
@@ -719,7 +890,7 @@ static int vm_session(bool brief, char *out, size_t cap) {
             release_vm();
             return 1;
         }
-        const uint32_t flash_off = 0x100000u;
+        const uint32_t flash_off = opt_ramdisk_off;
         if (rd_len > FLASH_SIZE - flash_off) rd_len = FLASH_SIZE - flash_off;
         memcpy(g_flash + flash_off, rd, rd_len);
         if (!g_quiet)

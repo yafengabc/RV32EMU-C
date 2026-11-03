@@ -77,7 +77,13 @@ void cpu_set_reg(cpu_t *c, int i, uint32_t v) {
     if (i != 0) c->x[i] = v;
 }
 void cpu_set_pc(cpu_t *c, uint32_t pc) { c->pc = pc; }
-void cpu_set_pending_int(cpu_t *c, uint32_t cause) { c->pending_int = cause; }
+void cpu_set_pending_int(cpu_t *c, uint32_t cause) {
+    /* Keep the interrupt that is already latched: the controller picks the
+     * highest-priority line, so re-raising the same line is a no-op and a
+     * different line waits for the current one to be taken. */
+    if (c->pending_int != 0 && c->pending_int != cause) return;
+    c->pending_int = cause;
+}
 void cpu_set_pmp_enforce(cpu_t *c, bool v) { c->pmp_enforce = v; }
 
 static inline void set_rd(cpu_t *c, int rd, uint32_t v) {
@@ -109,6 +115,10 @@ bool cpu_csr_read(cpu_t *c, uint32_t addr, uint32_t *val) {
         }
         if (addr >= CSR_PMPADDR0 && addr <= CSR_PMPADDR15) {
             *val = c->pmpaddr[addr - CSR_PMPADDR0];
+            return true;
+        }
+        if (addr >= 0x7C0u && addr <= 0x7FFu) {
+            *val = c->csr_custom[addr - 0x7C0u];
             return true;
         }
         *val = 0;
@@ -143,6 +153,10 @@ bool cpu_csr_write(cpu_t *c, uint32_t addr, uint32_t val) {
         if (addr >= CSR_PMPADDR0 && addr <= CSR_PMPADDR15) {
             c->pmpaddr[addr - CSR_PMPADDR0] = val;
             c->pmp_dirty = true;
+            return true;
+        }
+        if (addr >= 0x7C0u && addr <= 0x7FFu) {
+            c->csr_custom[addr - 0x7C0u] = val;
             return true;
         }
         return false;
@@ -192,6 +206,15 @@ static void check_interrupts(cpu_t *c) {
 void cpu_sample_interrupt(cpu_t *c) { check_interrupts(c); }
 
 static void illegal(cpu_t *c, uint32_t instr) {
+    /* A ROM call: the firmware jumped into the ROM window (the ROM image
+     * here is a hand-built stub, so the target decodes as 0x0000).  Dispatch
+     * it to the service and return to ra, exactly like the Go emulator. */
+    if (c->rom_call && c->cur_pc >= ROM_BASE &&
+        c->cur_pc < ROM_BASE + ROM_SIZE) {
+        c->rom_call(c->rom_ctx, c, c->cur_pc);
+        c->pc = c->x[1];
+        return;
+    }
     enter_trap(c, CAUSE_ILLEGAL_INSTR, instr, c->cur_pc);
 }
 
@@ -392,24 +415,24 @@ static void exec_system(cpu_t *c, uint32_t instr) {
         }
         break;
     case 1: {
-        uint32_t v;
+        uint32_t v, src = c->x[r1];
         if (!cpu_csr_read(c, csr, &v)) { illegal(c, instr); return; }
         set_rd(c, rd, v);
-        cpu_csr_write(c, csr, c->x[r1]);
+        cpu_csr_write(c, csr, src);
         break;
     }
     case 2: {
-        uint32_t v;
+        uint32_t v, src = c->x[r1];
         if (!cpu_csr_read(c, csr, &v)) { illegal(c, instr); return; }
         set_rd(c, rd, v);
-        cpu_csr_write(c, csr, v | c->x[r1]);
+        cpu_csr_write(c, csr, v | src);
         break;
     }
     case 3: {
-        uint32_t v;
+        uint32_t v, src = c->x[r1];
         if (!cpu_csr_read(c, csr, &v)) { illegal(c, instr); return; }
         set_rd(c, rd, v);
-        cpu_csr_write(c, csr, v & ~c->x[r1]);
+        cpu_csr_write(c, csr, v & ~src);
         break;
     }
     case 5: {

@@ -16,7 +16,12 @@ rv32emu-c/
 │  ├─ cpu.c                   Step、RV32I/M、C 扩展、CSR、trap、PMP
 │  ├─ block.c                 基本块预解码缓存 + RunHot + 块链
 │  ├─ mem.c                   32 MiB 平铺总线、RAM/ROM、代码页版本
-│  ├─ perip.c                 UART/GPIO/USJ/RTC/TIMG0/INTMTX/SPI1
+│  ├─ perip.c                 UART/GPIO/USJ/RTC/TIMG0/INTMTX/SPI/eFuse/ADC
+│  ├─ cache.c                 flash cache / XIP MMU（0x3C/0x42 别名、页映射）
+│  ├─ image.c                 ESP-IDF app image 引导（分区表 + 段加载）
+│  ├─ systimer.c              SYSTIMER（双 52 位计数器 + 比较器中断）
+│  ├─ c3more.c                UART1/SPI2/I2C0/SYSTEM 与寄存器影子
+│  ├─ rom_service.c           ROM 符号服务：printf/MD5/CRC/libc/软整数/软浮点
 │  ├─ rom.c                   esp_rom_spiflash_read/write/config_param 桩
 │  ├─ elf.c                   ELF32 / raw bin 加载
 │  ├─ disasm.c                -trace 用的反汇编
@@ -83,11 +88,27 @@ gcc -std=c11 -O3 -DNDEBUG -flto -o build/rv32emu-c.exe src/*.c
 
 # 纯模拟计时（不包含进程启动、ELF 加载和终端输出）
 .\build\rv32emu-c.exe -elf fib.elf -bench 0 -reps 7 -quiet
+
+# ESP32-C3 MicroPython 固件（ESP-IDF app image，直接放入 flash）
+.\build\rv32emu-c.exe -flashimg fw.bin -max 90000000
 ```
 
-已支持的参数：`-elf -bin -entry -ramdisk -max -step -tickdiv -nopmp -traplog -trace -breakpc -dumpram -regs -rxrate -rxperiod -rxdelay -bench -reps -quiet`。
+`-flashimg` 把镜像按真机偏移写入 SPI flash（其余字节为 `0xFF`），从 flash 里的分区表
+找到 app 分区，按 app header 的段表加载：XIP 段经 MMU 映射到 `0x4200_0000`/`0x3C00_0000`
+别名，RAM 段拷进 SRAM，`SP` 设为 `0x3FCD_E000`。启动后可以直接在 REPL 里输入；
+管道脚本要加 `-clk wall`：
 
-与原 Go CLI 的差异只在调试便利功能：没有 `-watch`、`-fault`、`-traceirq`、`-tracefrom/-traceto`。核心执行、异常、PMP、外设和软件复位路径都是对齐的。
+```powershell
+"print(2+3)`r`n" | .\build\rv32emu-c.exe -flashimg fw.bin -max 90000000 `
+    -rxdelay 25000000 -rxperiod 1000 -clk wall
+```
+
+（默认的按指令计时和 Go 版一致：banner 和 `>>>` 都正常，但 REPL 的接收中断在
+Go 版同样不会在该时序下被唤醒；`-clk wall` 让 SYSTIMER 按墙钟继续走，输入才会被处理。）
+
+已支持的参数：`-elf -bin -flashimg -entry -ramdisk -max -step -tickdiv -clk -nopmp -traplog -trace -breakpc -dumpram -regs -rxrate -rxperiod -rxdelay -bench -reps -quiet`。
+
+与原 Go CLI 的差异只在调试便利功能：没有 `-watch`、`-fault`、`-traceirq`、`-tracefrom/-traceto`；另多一个 `-clk wall`（默认与 Go 一样按指令数驱动定时器，`-clk wall` 改成按主机墙钟）。核心执行、异常、PMP、外设和软件复位路径都是对齐的。
 
 ## 移植时保留的关键设计
 
@@ -100,11 +121,19 @@ gcc -std=c11 -O3 -DNDEBUG -flto -o build/rv32emu-c.exe src/*.c
 
 ## 正确性验证
 
-在移植过程中做了三层对照：
+在移植过程中做了四层对照：
 
 1. `fib(28)` 的最终寄存器、PC、指令数（15,426,855）和 timg0 fires 与 Go 版逐字一致（`a0=0x4D973=317811`）。
-2. TinyOS `kernel-esp32c3.elf + ramdisk` 跑到 `tos>`，5,000,000 条指令后的 UART 文本、`timg0 fires=498`、`interrupts=296`、`exceptions=19` 与 Go 版一致。
+2. TinyOS `kernel-esp32c3.elf + ramdisk` 跑到 `tos>`，5,000,000 条指令后的 UART 文本与
+   Go 版逐字一致；计时/中断计数为 `timg0 fires=464`、`interrupts=500`、`exceptions=20`
+   （Go：471 / 391 / 20）。差异来自 C 侧按真机源号 32 经 INTMTX 路由、Go 侧走未映射兜底，
+   中断嵌套时序略有不同，不影响客户机行为。
 3. 同一份 C 程序分别用 `-max`（RunHot）和 `-step`（逐条 Step）在 1M 指令内对比 PC/寄存器；早期版本正是靠这个抓到 `C.JR` 解码漏了 `term` 标志的 bug。
+4. ESP32-C3 MicroPython `fw.bin`（`-flashimg`）：跑过 `rtc_init`、FreeRTOS 调度器启动，
+   输出完整 banner 并进入 `>>>` REPL；默认计时下 90M 条指令的 `cpu interrupts=407`
+   与 Go 版逐字一致。REPL 输入用 `-clk wall`（见上面运行一节）验证，管道送入
+   `print(2+3)` 得到 `5`。这条路径同时覆盖了 ROM 服务、XIP/MMU、SPI flash、SYSTIMER
+   和 INTMTX 主动中断。
 
 ## 在 QEMU 上验证
 
@@ -278,13 +307,19 @@ build\rv32emu-bench.exe compare -reps 7 -tinyos
 与 Go 版对齐的语义边界（完整列表见 Go 仓库 README 的「当前边界」），以及 C 版特有的部分：
 
 - **指令集**：RV32IMC（I/M/C）。没有 F/D，没有 A —— 原子指令按非法指令 trap。
-- **固件布局**：只支持扁平链接、从 `0x40000000` 执行的镜像。ESP-IDF 默认的 `0x42000000`
-  指令别名和 `0x3C000000` 数据别名没有建模，这类镜像要先重链接（TinyOS 是扁平链接的）。
-- **外设**：只覆盖 TinyOS 用到的 UART0 / GPIO 影子 / TIMG0 / INTMTX（被动影子）/ SPI1 扇区
-  擦除 / USJ（黑洞）/ RTC_CNTL（被动）。**UART 接收中断没有建模**，输入走内核的 tick 轮询
-  兜底；没有看门狗、deep sleep、USB-Serial-JTAG 协议。未建模地址读 0、写丢弃并按地址
-  去重告警。
-- **时序**：tick 是「每 N 条指令」而不是墙钟量，单条指令耗时均匀；没有总线竞争、cache、
+- **固件布局**：`-elf`/`-bin` 仍按扁平链接（从 `0x40000000` 执行）加载，TinyOS 属于这一类；
+  `-flashimg` 走真机路径：SPI flash + 分区表 + ESP-IDF app image，XIP 段经 MMU 映射到
+  `0x42000000`（IROM）和 `0x3C000000`（DROM）别名，RAM 段拷进 SRAM。
+- **外设**：UART0/1、GPIO、TIMG0（T0 + TG0WDT）、RTC_CNTL（时间/WDT/SWD/软复位）、
+  SYSTIMER、INTMTX（主动路由，源→线映射、使能、优先级、阈值）、SPI0/SPI1（flash 命令）、
+  SPI2、I2C0、eFuse、ADC、SYSTEM/FROM_CPU 中断与 18 个寄存器影子。UART 接收中断
+  （FULL/TOUT）已建模，控制台输入同时支持轮询兜底；没有 deep sleep、USB-Serial-JTAG 协议。
+  未建模地址读 0、写丢弃并按地址去重告警（与 Go 版返回 0 的语义一致）。
+- **ROM**：非法指令落在 `0x40000000..0x40080000` 时转入 ROM 符号服务，已实现
+  printf 家族、MD5、CRC32/16/8、常用 libc、64 位软整数与软浮点、`qsort`/`itoa`/`div`，
+  以及 `esp_rom_intr_matrix_set` 等启动路径用到的入口。
+- **时序**：tick 默认按「每 N 条指令」推进（与 Go 版一致、可复现，`-rxdelay` 等脚本参数
+  也因此可预测）；`-clk wall` 改为按主机墙钟推进。单条指令耗时均匀，没有总线竞争、cache、
   flash 等待周期。`-tickdiv` 用来做时序敏感性实验——TinyOS 的 `sched_switch` 竞态就是
   这样复现的。
 - **没有 GDB stub**：调试靠 `-traplog` / `-breakpc` / `-dumpram` / `-step` 这套快照工具。

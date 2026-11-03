@@ -4,11 +4,13 @@
 
 #define FLASH_BASE 0x3F000000u
 
-#define ENTRY_WRITE 0x12Cu
-#define ENTRY_READ  0x130u
-#define ENTRY_CONF  0x134u
-#define IMPL_READ   0x400u
-#define IMPL_WRITE  0x440u
+#define ENTRY_WRITE ROM_ENTRY_WRITE
+#define ENTRY_READ  ROM_ENTRY_READ
+#define ENTRY_CONF  ROM_ENTRY_CONF
+/* Do not use 0x400/0x440: 0x40000400 onwards are real ROM libc entries
+ * (strndup/atoi), and this stub would overwrite them. */
+#define IMPL_READ   ROM_IMPL_READ
+#define IMPL_WRITE  ROM_IMPL_WRITE
 
 static uint32_t enc_lui(uint32_t rd, uint32_t imm20) {
     return (imm20 << 12) | (rd << 7) | 0x37u;
