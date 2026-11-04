@@ -87,6 +87,14 @@
 #define ROM_I2C_WRITE         0x4000195cu
 #define ROM_I2C_WRITE_MASK    0x40001960u
 
+/* BBPLL register file, reached over that I2C bus: block 0x66, host 0, one
+ * byte per register.  Only three of them matter to a clock init. */
+#define BBPLL_BLOCK           0x66u
+#define BBPLL_HOST            0u
+#define BBPLL_OC_DIV_7_0      3u
+#define BBPLL_OR_LOCK         8u
+#define BBPLL_LOCK            (1u << 7)
+
 /* libgcc soft integer helpers */
 #define ROM_ADD_DF3           0x4000076cu
 #define ROM_ADD_SF3           0x40000770u
@@ -186,10 +194,53 @@
 struct rom_service {
     bus_t    *bus;
     uart_t   *uart;
-    uint32_t  ticks_per_us;
     uint32_t  xtal_div;
     uint8_t  *unknown;  /* one flag per ROM word (0x80000/4) */
+
+    /* The BBPLL has no memory-mapped registers: firmware reaches it over the
+     * RTC's internal I2C bus through ROM_I2C_* (esp-idf's PHY code does the
+     * same).  One flat byte-per-register file for block 0x66 / host 0 is
+     * enough to answer the only question a clock init asks of it - whether
+     * the PLL locked - instead of replying 0 forever and leaving the core on
+     * its 20 MHz fallback. */
+    uint8_t   bbpll[256];
 };
+
+/* ---- BBPLL over the ROM's I2C helpers ------------------------------- */
+
+static void bbpll_write(rom_service_t *s, uint32_t block, uint32_t host,
+                        uint32_t reg, uint32_t val) {
+    if (block != BBPLL_BLOCK || host != BBPLL_HOST) return;
+    s->bbpll[reg & 0xFFu] = (uint8_t)val;
+}
+
+/* rom_i2c_writeReg_Mask(block, host, reg, msb, lsb, data): read-modify-write
+ * of one field.  The PHY-style configuration of the PLL is all field writes,
+ * so the width and shift have to be honoured or the divider comes out wrong. */
+static void bbpll_write_mask(rom_service_t *s, uint32_t block, uint32_t host,
+                             uint32_t reg, uint32_t msb, uint32_t lsb,
+                             uint32_t val) {
+    uint32_t mask, cur;
+
+    if (block != BBPLL_BLOCK || host != BBPLL_HOST || msb < lsb || msb > 7u)
+        return;
+    mask = ((1u << (msb - lsb + 1u)) - 1u) << lsb;
+    cur = s->bbpll[reg & 0xFFu];
+    s->bbpll[reg & 0xFFu] = (uint8_t)((cur & ~mask) | ((val << lsb) & mask));
+}
+
+static uint32_t bbpll_read(rom_service_t *s, uint32_t block, uint32_t host,
+                           uint32_t reg) {
+    if (block != BBPLL_BLOCK || host != BBPLL_HOST) return 0;
+    /* The lock bit is a result of calibration, not something firmware
+     * writes.  Report it once the loop divider has been programmed - the
+     * last step before a real chip locks - so a caller that polls OR_LOCK
+     * sees the PLL come up instead of spinning 200000 times and staying on
+     * the 20 MHz fallback. */
+    if ((reg & 0xFFu) == BBPLL_OR_LOCK && s->bbpll[BBPLL_OC_DIV_7_0] != 0)
+        return (uint32_t)(s->bbpll[BBPLL_OR_LOCK] | BBPLL_LOCK);
+    return s->bbpll[reg & 0xFFu];
+}
 
 /* ---- guest memory helpers ------------------------------------------- */
 
@@ -1058,14 +1109,20 @@ void rom_service_call(rom_service_t *s, cpu_t *c, uint32_t addr) {
         ret(c, 0);
         return;
     case ROM_GET_CPU_FREQ:
-        ret(c, s->ticks_per_us);
+        /* Derive it: the clock mux is in SYSTEM_SYSCLK_CONF, and a firmware
+         * that moved it knows better than a canned constant. */
+        ret(c, c3clk_cpu_hz(s->bus) / 1000000u);
         return;
     case ROM_SET_CPU_FREQ:
-        s->ticks_per_us = arg(s, c, 0);
+        /* On silicon this reprograms the clock tree; here the tree is the
+         * firmware's own registers (SYSTEM_SYSCLK_CONF), so there is nothing
+         * separate to set.  Accepted and ignored rather than remembered -
+         * a stored-but-unused value would make GET_CPU_FREQ disagree with
+         * the dividers the guest actually programmed. */
         ret(c, 0);
         return;
     case ROM_GET_APB_FREQ:
-        ret(c, s->ticks_per_us);
+        ret(c, c3clk_apb_hz(s->bus) / 1000000u);
         return;
     case ROM_GET_XTAL_FREQ:
         ret(c, 40);
@@ -1159,9 +1216,27 @@ void rom_service_call(rom_service_t *s, cpu_t *c, uint32_t addr) {
         ret(c, 0xFFFFFFFFu);
         return;
     case ROM_I2C_READ:
-    case ROM_I2C_READ_MASK:
+        ret(c, bbpll_read(s, arg(s, c, 0), arg(s, c, 1), arg(s, c, 2)));
+        return;
+    case ROM_I2C_READ_MASK: {
+        uint32_t msb = arg(s, c, 3), lsb = arg(s, c, 4), v;
+
+        if (msb < lsb || msb > 7u) {
+            ret(c, 0);
+            return;
+        }
+        v = bbpll_read(s, arg(s, c, 0), arg(s, c, 1), arg(s, c, 2));
+        ret(c, (v >> lsb) & ((1u << (msb - lsb + 1u)) - 1u));
+        return;
+    }
     case ROM_I2C_WRITE:
+        bbpll_write(s, arg(s, c, 0), arg(s, c, 1), arg(s, c, 2),
+                    arg(s, c, 3));
+        ret(c, 0);
+        return;
     case ROM_I2C_WRITE_MASK:
+        bbpll_write_mask(s, arg(s, c, 0), arg(s, c, 1), arg(s, c, 2),
+                         arg(s, c, 3), arg(s, c, 4), arg(s, c, 5));
         ret(c, 0);
         return;
 
@@ -1525,7 +1600,6 @@ rom_service_t *rom_service_new(bus_t *bus, uart_t *uart) {
     if (!s) return NULL;
     s->bus = bus;
     s->uart = uart;
-    s->ticks_per_us = 80;
     s->unknown = (uint8_t *)calloc(ROM_SIZE / 4, 1);
     if (!s->unknown) {
         free(s);

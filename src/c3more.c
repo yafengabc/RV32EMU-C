@@ -1,8 +1,10 @@
 /*
  * ESP32-C3 extra peripherals: UART1, SPI2 (GP-SPI), I2C0, SYSTEM software
- * interrupts, and register shadow windows.  Mirrors the Go c3more.go model:
- * funcion-less blocks only need to read back what firmware wrote, so bare
- * clock/pin init paths do not land on unmapped addresses.
+ * interrupts, the SYSTEM clock tree, and register shadow windows.  Mirrors
+ * the Go c3more.go model: blocks with no behaviour only need to read back
+ * what firmware wrote, so bare clock/pin init paths do not land on unmapped
+ * addresses.  The clock tree is the one exception - firmware reads it to
+ * decide what frequency it is running at, so it has to answer like a chip.
  */
 
 #include <stdlib.h>
@@ -241,7 +243,55 @@ static void i2c_write(void *ctx, uint32_t off, uint32_t size, uint32_t val) {
     }
 }
 
-/* ---- SYSTEM (CPU software interrupts) ------------------------------- */
+/* ---- SYSTEM (CPU software interrupts, clock tree) -------------------- */
+
+/* The clock tree is not storage: it is a function of two registers, and
+ * every consumer (TIMG counting APB cycles, ROM_GET_APB_FREQ, the emulator's
+ * own wall clock) has to agree with the guest about the answer.  So both
+ * directions live here - the reset values below are what a C3 reads before
+ * its bootloader touches anything, and c3clk_*_hz() derive the rates from
+ * whatever has been written since.
+ *
+ * Reset state, measured on a real C3 at the ROM's entry point:
+ *
+ *   SYSCLK_CONF  0x000a8001  SOC_CLK_SEL = XTAL, PRE_DIV_CNT = 1  (XTAL/2)
+ *   CPU_PER_CONF 0x00000040  CPUPERIOD_SEL = PLL/6, PLL_FREQ_SEL = 480 MHz
+ *
+ * The second one only says where the mux would go if it were pointed at the
+ * PLL; until SOC_CLK_SEL moves, the core runs at 20 MHz.  TinyOS checks
+ * exactly this pair before touching the PLL (board/esp32c3/platform.c), so a
+ * zeroed SYSTEM block reads as "not on XTAL/2" and it never brings the PLL
+ * up. */
+#define SYS_CPU_PER_CONF  0x000u
+#define SYS_SYSCLK_CONF   0x058u
+#define C3_XTAL_HZ        40000000u
+#define C3_RC_FAST_HZ     17500000u
+
+uint32_t c3clk_cpu_hz(bus_t *b) {
+    uint32_t sysclk = bus_read(b, SYSTEM_BASE + SYS_SYSCLK_CONF, 4);
+    uint32_t per = bus_read(b, SYSTEM_BASE + SYS_CPU_PER_CONF, 4);
+    uint32_t sel = (sysclk >> 10) & 3u;
+    uint32_t pre = (sysclk & 0x3FFu) + 1u;
+
+    if (sel == 1) {
+        /* PLL: PLL_FREQ_SEL picks the VCO, CPUPERIOD_SEL its divisor
+         * (0 = /6, 1 = /3 - the C3's 80 and 160 MHz). */
+        uint32_t vco = (per & 4u) ? 480000000u : 320000000u;
+        uint32_t div = ((per & 3u) == 1u) ? 3u : 6u;
+        return vco / div;
+    }
+    if (sel == 2) return C3_RC_FAST_HZ;
+    /* sel 0 is XTAL; sel 3 is reserved and treated the same way. */
+    return C3_XTAL_HZ / pre;
+}
+
+uint32_t c3clk_apb_hz(bus_t *b) {
+    uint32_t cpu = c3clk_cpu_hz(b);
+    /* C3: APB is half the core clock once the core is at 80 MHz or above,
+     * and equal to it below that (the ROM's 20 MHz XTAL/2 state is what the
+     * firmware's TIMG divider was calibrated against). */
+    return cpu >= 80000000u ? cpu / 2u : cpu;
+}
 
 static uint32_t sys_read(void *ctx, uint32_t off, uint32_t size) {
     c3extras_t *e = ctx;
@@ -297,6 +347,13 @@ c3extras_t *c3extras_new(bus_t *b, c3intc_t *intc) {
     c3extras_t *e = calloc(1, sizeof(*e));
     if (!e) return NULL;
     e->intc = intc;
+
+    /* What the ROM leaves behind: core on XTAL/2, PLL off but its divider
+     * already selected.  Zeroed clock registers are not a C3 state any
+     * firmware can boot from, and one that probes them (TinyOS does) would
+     * be told the clock tree is unusable. */
+    e->sys_regs[SYS_SYSCLK_CONF / 4] = 0x000a8001u;
+    e->sys_regs[SYS_CPU_PER_CONF / 4] = 0x00000040u;
 
     e->uart1 = uart_new();
     if (!e->uart1) {

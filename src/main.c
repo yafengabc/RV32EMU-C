@@ -39,13 +39,15 @@ static uint64_t host_ns(void) {
 #endif
 }
 
-/* Clock rates a guest programs its peripherals against.  These are not free
- * parameters: the clock tree is plain storage here (c3more.c), so firmware
- * that probes SYSTEM_SYSCLK_CONF - TinyOS does, to pick the TIMG divider -
- * reads zero and stays on the ROM's XTAL/2, a 20 MHz APB.  TIMG counts APB
- * cycles, SYSTIMER always runs at 16 MHz, and the RTC slow clock is the
- * 136 kHz RC oscillator the C3 comes up on. */
-#define EMU_APB_HZ      20000000u
+/* Clock rates a guest programs its peripherals against.  TIMG counts APB
+ * cycles, so its rate is not a constant here: it is whatever the guest's own
+ * clock tree says (SYSTEM_SYSCLK_CONF / SYSTEM_CPU_PER_CONF, see
+ * c3clk_apb_hz in c3more.c), because the guest programs its divider from the
+ * same two registers.  Pinning APB at 20 MHz while the firmware has moved
+ * the mux to the PLL would leave its tick four times slow, and pinning it at
+ * 80 while the firmware is still on XTAL/2 would make it four times fast.
+ * SYSTIMER always runs at 16 MHz, and the RTC slow clock is the 136 kHz RC
+ * oscillator the C3 comes up on. */
 #define EMU_SYSTIMER_HZ 16000000u
 #define EMU_RTC_HZ      136000u
 
@@ -593,7 +595,8 @@ static bool machine_run(machine_t *m) {
             uint64_t t = host_ns();
             uint64_t d = t - clk_prev;
             clk_prev = t;
-            c3timer_tick_n(m->timer, ns_to_counts(d, EMU_APB_HZ, &rem_apb));
+            c3timer_tick_n(m->timer,
+                           ns_to_counts(d, c3clk_apb_hz(m->bus), &rem_apb));
             c3systimer_tick_n(m->systimer,
                               ns_to_counts(d, EMU_SYSTIMER_HZ, &rem_st));
             rtc_tick(m->rtc, ns_to_counts(d, EMU_RTC_HZ, &rem_rtc));

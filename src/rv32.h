@@ -364,6 +364,12 @@ typedef struct {
 c3extras_t *c3extras_new(bus_t *b, c3intc_t *intc);
 void        c3extras_free(c3extras_t *e);
 
+/* Clock tree, derived from SYSTEM_SYSCLK_CONF / SYSTEM_CPU_PER_CONF.  Every
+ * consumer asks these instead of assuming a rate: the guest programs its
+ * dividers from the same two registers. */
+uint32_t c3clk_cpu_hz(bus_t *b);
+uint32_t c3clk_apb_hz(bus_t *b);
+
 /* Flash cache / XIP MMU (EXTMEM control regs + 128-entry page table). */
 typedef struct flashmmu flashmmu_t;
 typedef struct {

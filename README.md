@@ -320,10 +320,13 @@ build\rv32emu-bench.exe compare -reps 7 -tinyos
   未建模地址读 0、写丢弃并按地址去重告警（与 Go 版返回 0 的语义一致）。
 - **ROM**：非法指令落在 `0x40000000..0x40080000` 时转入 ROM 符号服务，已实现
   printf 家族、MD5、CRC32/16/8、常用 libc、64 位软整数与软浮点、`qsort`/`itoa`/`div`，
-  以及 `esp_rom_intr_matrix_set` 等启动路径用到的入口。
-- **时序**：时钟默认按主机墙钟推进，三个时基各按自己的频率计数——TIMG 按 APB 20 MHz
-  （时钟树寄存器是普通存储、读回 0，固件据此退回 ROM 的 XTAL/2）、SYSTIMER 16 MHz、
-  RTC 慢钟 136 kHz，各自的亚周期余量跨批次累加。`T0CONFIG` 的 13:28 分频字段按真机语义
+  以及 `esp_rom_intr_matrix_set` 等启动路径用到的入口。`rom_i2c_*` 连着一块 BBPLL
+  寄存器文件（block 0x66），`OR_LOCK` 在环路分频器被编程后置位——这是固件敢把
+  CPU 时钟切到 PLL 的前提。
+- **时序**：时钟默认按主机墙钟推进，三个时基各按自己的频率计数——TIMG 按**当前的**
+  APB（时钟树从 `SYSTEM_SYSCLK_CONF` / `SYSTEM_CPU_PER_CONF` 推导，复位态是 ROM 的
+  XTAL/2 = 20 MHz，固件把 PLL 拉起来之后是 80 MHz）、SYSTIMER 16 MHz、RTC 慢钟
+  136 kHz，各自的亚周期余量跨批次累加。`T0CONFIG` 的 13:28 分频字段按真机语义
   生效（写的是除数本身，0 表示 65536）。`-clk insn` 退回「每条指令一个 TIMG 计数」：
   可复现、`-rxdelay` 等脚本参数也因此可预测，但那是任何芯片都没有的时间基准。
   `-bench` 只测指令吞吐，不受 `-clk` 影响。单条指令耗时均匀，没有总线竞争、cache、
