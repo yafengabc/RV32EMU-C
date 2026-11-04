@@ -443,6 +443,8 @@ static void rtc_write(void *ctx, uint32_t off, uint32_t size, uint32_t val) {
 
 #define T0_EN        (1u << 31)
 #define T0_ALARM_EN  (1u << 10)
+#define T0_DIVIDER_S 13
+#define T0_DIVIDER_M 0xFFFFu
 #define T0_WDT_EN    (1u << 31)
 #define T0_WDT_PROTECT_KEY 0x50D83AA1u
 #define T0_RTC_CALI_START (1u << 31)
@@ -587,6 +589,13 @@ static void timg_write(void *ctx, uint32_t off, uint32_t size, uint32_t val) {
     switch (o) {
     case T0_CONFIG:
         t->regs[o >> 2] = val;
+        /* Bits 13:28 divide the APB clock feeding the counter.  The field
+         * holds the divisor itself, not divisor-1, and 0 (the reset value)
+         * means 65536 - both pinned on a real C3 by board/esp32c3/platform.c
+         * of TinyOS, which therefore writes the divisor it wants. */
+        c3timer_set_div(t, ((val >> T0_DIVIDER_S) & T0_DIVIDER_M)
+                               ? ((val >> T0_DIVIDER_S) & T0_DIVIDER_M)
+                               : 65536u);
         if (val & T0_EN) t->counter = 0;
         break;
     case T0_ALARM_LO:

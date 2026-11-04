@@ -18,9 +18,9 @@
 
 bool g_quiet = false;
 
-/* Host wall clock in nanoseconds.  The guest's TIMG is driven by this (see
- * opt_clk_inst), because a real chip's timer runs off a crystal, not off the
- * number of instructions executed. */
+/* Host wall clock in nanoseconds.  The guest's timer, SYSTIMER and RTC are
+ * driven by this (see opt_clk_inst), because a real chip's timebase runs off a
+ * crystal, not off the number of instructions executed. */
 static uint64_t host_ns(void) {
 #ifdef _WIN32
     static LARGE_INTEGER freq;
@@ -39,6 +39,27 @@ static uint64_t host_ns(void) {
 #endif
 }
 
+/* Clock rates a guest programs its peripherals against.  These are not free
+ * parameters: the clock tree is plain storage here (c3more.c), so firmware
+ * that probes SYSTEM_SYSCLK_CONF - TinyOS does, to pick the TIMG divider -
+ * reads zero and stays on the ROM's XTAL/2, a 20 MHz APB.  TIMG counts APB
+ * cycles, SYSTIMER always runs at 16 MHz, and the RTC slow clock is the
+ * 136 kHz RC oscillator the C3 comes up on. */
+#define EMU_APB_HZ      20000000u
+#define EMU_SYSTIMER_HZ 16000000u
+#define EMU_RTC_HZ      136000u
+
+/* How many whole cycles of a `hz` clock fit in `ns` nanoseconds.  `*rem`
+ * carries the fraction that did not make a cycle, so a batch far shorter than
+ * one RTC tick still adds up instead of truncating to zero every time. */
+static uint64_t ns_to_counts(uint64_t ns, uint32_t hz, uint64_t *rem) {
+    uint64_t whole = ns / 1000000000ull;
+    uint64_t frac = ns % 1000000000ull;
+    uint64_t acc = frac * (uint64_t)hz + *rem;
+    *rem = acc % 1000000000ull;
+    return whole * (uint64_t)hz + acc / 1000000000ull;
+}
+
 /* ---- command line --------------------------------------------------- */
 
 static const char *opt_elf = NULL;
@@ -50,10 +71,12 @@ static uint32_t opt_entry = RESET_VECTOR;
 static uint64_t opt_max = 0;
 static uint64_t opt_step = 0;
 static int opt_tickdiv = 1;
-/* 1 = one timer count per executed instruction (the default, matching the Go
- * build: runs are exactly reproducible and piped stdin lines up with -rxdelay),
- * 0 = drive the guest timer from the host wall clock (-clk wall). */
-static int opt_clk_inst = 1;
+/* 0 = the guest timebase follows the host clock (the default: a chip's
+ * crystals do not care how many instructions retired, and a guest that sleeps,
+ * keeps a wall clock or talks over a UART needs time to move while the CPU is
+ * idle), 1 = one timer count per executed instruction (-clk insn), which makes
+ * a run exactly reproducible at the price of a timebase no chip has. */
+static int opt_clk_inst = 0;
 static int opt_rxrate = 16;
 static uint64_t opt_rxperiod = 10000;
 static uint64_t opt_rxdelay = 0;
@@ -81,7 +104,7 @@ void usage(const char *argv0) {
     printf("  -max N           stop after N instructions (0 = until halt)\n");
     printf("  -step N          execute N instructions then dump registers\n");
     printf("  -tickdiv N       stretch the TIMG0 period by N\n");
-    printf("  -clk wall        drive the timer from the host clock (default: instruction count)\n");
+    printf("  -clk wall|insn   timebase: host clock (default) or instruction count\n");
     printf("  -nopmp           disable PMP enforcement in U-mode\n");
     printf("  -traplog         log synchronous traps\n");
     printf("  -trace           print every instruction\n");
@@ -148,7 +171,7 @@ static void reset_options(void) {
     opt_max = 0;
     opt_step = 0;
     opt_tickdiv = 1;
-    opt_clk_inst = 1;
+    opt_clk_inst = 0;
     opt_rxrate = 16;
     opt_rxperiod = 10000;
     opt_rxdelay = 0;
@@ -503,12 +526,12 @@ static bool machine_run(machine_t *m) {
         printf("=== RV32EMU start pc=0x%08X ===\n", c->pc);
     }
     uint64_t n = 0;
-    /* Wall-clock mode (-clk wall): TIMG0 counts microseconds of host time.
-     * The remainder is carried between batches so a 1000-instruction batch
-     * that takes less than a microsecond still adds up instead of truncating
-     * to zero. */
+    /* Wall-clock mode: every timebase counts its own frequency of host time.
+     * The remainders are carried between batches (ns_to_counts), because a
+     * 1000-instruction batch is microseconds long and the RTC would otherwise
+     * never advance at all. */
     uint64_t clk_prev = host_ns();
-    uint64_t clk_rem_ns = 0;
+    uint64_t rem_apb = 0, rem_st = 0, rem_rtc = 0;
     /* Carries sub-8 remainders when SYSTIMER is folded in single-step mode. */
     uint64_t sys_acc = 0;
     while (!c->halted && (limit == 0 || n < limit)) {
@@ -541,8 +564,10 @@ static bool machine_run(machine_t *m) {
         }
         if (ran == 0) break;
         if (opt_clk_inst) {
-            /* One timer count per instruction: the old behaviour, and the
-             * one to use when a run has to be exactly reproducible. */
+            /* One timer count per instruction (-clk insn): reproducible, and
+             * a timebase no chip has.  The divider still applies, so a guest
+             * that asked for a 1 MHz count rate gets one count per divider
+             * instructions rather than one per instruction. */
             c3timer_tick_n(m->timer, ran);
             /* Single-stepping would advance SYSTIMER once per instruction, so
              * the firmware's "read VAL_LO twice and wait for the same value"
@@ -561,14 +586,17 @@ static bool machine_run(machine_t *m) {
             rtc_tick(m->rtc, ran);
         } else {
             /* Real clock: a crystal does not care how many instructions
-             * retired, so neither does the emulated TIMG/SYSTIMER. */
+             * retired, so neither do the emulated TIMG/SYSTIMER/RTC.  Each
+             * counts at its own rate - feeding all three one count per
+             * microsecond only looked right for a guest that happened to
+             * program a 1 MHz count rate, and ran the RTC 136 times fast. */
             uint64_t t = host_ns();
-            uint64_t d = (t - clk_prev) + clk_rem_ns;
+            uint64_t d = t - clk_prev;
             clk_prev = t;
-            clk_rem_ns = d % 1000u;
-            c3timer_tick_n(m->timer, d / 1000u);
-            c3systimer_tick_n(m->systimer, d / 1000u);
-            rtc_tick(m->rtc, d / 1000u);
+            c3timer_tick_n(m->timer, ns_to_counts(d, EMU_APB_HZ, &rem_apb));
+            c3systimer_tick_n(m->systimer,
+                              ns_to_counts(d, EMU_SYSTIMER_HZ, &rem_st));
+            rtc_tick(m->rtc, ns_to_counts(d, EMU_RTC_HZ, &rem_rtc));
         }
 
         if (g_console_up) {

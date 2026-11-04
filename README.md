@@ -96,19 +96,22 @@ gcc -std=c11 -O3 -DNDEBUG -flto -o build/rv32emu-c.exe src/*.c
 `-flashimg` 把镜像按真机偏移写入 SPI flash（其余字节为 `0xFF`），从 flash 里的分区表
 找到 app 分区，按 app header 的段表加载：XIP 段经 MMU 映射到 `0x4200_0000`/`0x3C00_0000`
 别名，RAM 段拷进 SRAM，`SP` 设为 `0x3FCD_E000`。启动后可以直接在 REPL 里输入；
-管道脚本要加 `-clk wall`：
+管道脚本不加 `-clk` 也可以：
 
 ```powershell
 "print(2+3)`r`n" | .\build\rv32emu-c.exe -flashimg fw.bin -max 90000000 `
-    -rxdelay 25000000 -rxperiod 1000 -clk wall
+    -rxdelay 25000000 -rxperiod 1000
 ```
 
-（默认的按指令计时和 Go 版一致：banner 和 `>>>` 都正常，但 REPL 的接收中断在
-Go 版同样不会在该时序下被唤醒；`-clk wall` 让 SYSTIMER 按墙钟继续走，输入才会被处理。）
+（时钟默认按主机墙钟走，输入到达时 SYSTIMER 确实会前进，接收中断才会被唤醒。
+加 `-clk insn` 会退回按指令数计时：banner 和 `>>>` 照常，但管道输入在该时序下
+不会被唤醒——那是可复现基准要的取舍，不是正常运行的默认。）
 
 已支持的参数：`-elf -bin -flashimg -entry -ramdisk -max -step -tickdiv -clk -nopmp -traplog -trace -breakpc -dumpram -regs -rxrate -rxperiod -rxdelay -bench -reps -quiet`。
 
-与原 Go CLI 的差异只在调试便利功能：没有 `-watch`、`-fault`、`-traceirq`、`-tracefrom/-traceto`；另多一个 `-clk wall`（默认与 Go 一样按指令数驱动定时器，`-clk wall` 改成按主机墙钟）。核心执行、异常、PMP、外设和软件复位路径都是对齐的。
+与原 Go CLI 的差异只在调试便利功能：没有 `-watch`、`-fault`、`-traceirq`、`-tracefrom/-traceto`；
+时钟默认按主机墙钟推进（Go 版按指令数），`-clk insn` 可以退回那个行为，`-clk wall`
+现在只是把默认写明。核心执行、异常、PMP、外设和软件复位路径都是对齐的。
 
 ## 移植时保留的关键设计
 
@@ -318,8 +321,12 @@ build\rv32emu-bench.exe compare -reps 7 -tinyos
 - **ROM**：非法指令落在 `0x40000000..0x40080000` 时转入 ROM 符号服务，已实现
   printf 家族、MD5、CRC32/16/8、常用 libc、64 位软整数与软浮点、`qsort`/`itoa`/`div`，
   以及 `esp_rom_intr_matrix_set` 等启动路径用到的入口。
-- **时序**：tick 默认按「每 N 条指令」推进（与 Go 版一致、可复现，`-rxdelay` 等脚本参数
-  也因此可预测）；`-clk wall` 改为按主机墙钟推进。单条指令耗时均匀，没有总线竞争、cache、
+- **时序**：时钟默认按主机墙钟推进，三个时基各按自己的频率计数——TIMG 按 APB 20 MHz
+  （时钟树寄存器是普通存储、读回 0，固件据此退回 ROM 的 XTAL/2）、SYSTIMER 16 MHz、
+  RTC 慢钟 136 kHz，各自的亚周期余量跨批次累加。`T0CONFIG` 的 13:28 分频字段按真机语义
+  生效（写的是除数本身，0 表示 65536）。`-clk insn` 退回「每条指令一个 TIMG 计数」：
+  可复现、`-rxdelay` 等脚本参数也因此可预测，但那是任何芯片都没有的时间基准。
+  `-bench` 只测指令吞吐，不受 `-clk` 影响。单条指令耗时均匀，没有总线竞争、cache、
   flash 等待周期。`-tickdiv` 用来做时序敏感性实验——TinyOS 的 `sched_switch` 竞态就是
   这样复现的。
 - **没有 GDB stub**：调试靠 `-traplog` / `-breakpc` / `-dumpram` / `-step` 这套快照工具。
