@@ -45,6 +45,12 @@
 #define ROM_CACHE_LINE_SIZE   0x400004b0u
 #define ROM_BOOT_CACHE_INIT   0x400004c8u
 #define ROM_CACHE_INVAL       0x400004d4u
+/* Cache_Invalidate_ICache_All: called by an XIP boot stub right after it
+ * rewrites the MMU page table, before the first fetch through the new
+ * window.  The emulator has no instruction cache to drop, so this is a
+ * no-op - but it must exist, or the dispatch below reports "unimplemented"
+ * and the guest never reaches its shell. */
+#define ROM_CACHE_INVAL_ALL   0x400004d8u
 #define ROM_CACHE_DISABLE     0x4000051cu
 #define ROM_CACHE_ENABLE      0x40000520u
 #define ROM_CACHE_SUSPEND     0x40000524u
@@ -1099,6 +1105,7 @@ void rom_service_call(rom_service_t *s, cpu_t *c, uint32_t addr) {
         return;
     case ROM_BOOT_CACHE_INIT:
     case ROM_CACHE_INVAL:
+    case ROM_CACHE_INVAL_ALL:
     case ROM_CACHE_DISABLE:
     case ROM_CACHE_ENABLE:
     case ROM_CACHE_SUSPEND:
