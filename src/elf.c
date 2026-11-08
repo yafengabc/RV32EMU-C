@@ -29,7 +29,12 @@ static uint8_t *read_file(const char *path, uint32_t *out_len) {
 
 static bool in_builtin(uint32_t addr) {
     return (addr >= 0x40000000u && addr < 0x40080000u) ||
-           (addr >= 0x3FC80000u && addr < 0x3FC80000u + 0x80000u);
+           (addr >= 0x3FC80000u && addr < 0x3FC80000u + 0x80000u) ||
+           /* DROM/IROM are the flash cache windows: the loader writes the
+            * segment into the XIP overlay, and reads must come back through
+            * the same window.  Adding a RAM region here would shadow it. */
+           (addr >= DROM_BASE && addr < DROM_BASE + XIP_WINDOW_SIZE) ||
+           (addr >= IROM_BASE && addr < IROM_BASE + XIP_WINDOW_SIZE);
 }
 
 typedef struct {
