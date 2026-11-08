@@ -12,7 +12,7 @@ import (
 )
 
 const flashSize = 4 * 1024 * 1024
-const fsOffset = 0x100000
+const fsOffset = 0x80000
 
 func makeFlash(kernelPath, ramdiskPath, outPath string) (int, int, error) {
 	kernel, err := os.ReadFile(kernelPath)

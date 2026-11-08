@@ -256,7 +256,7 @@ func stageGoBench(repo, out string) error {
 	if err := os.WriteFile(filepath.Join(stage, "go.mod"), []byte(goMod), 0o644); err != nil {
 		return err
 	}
-	for _, pkg := range []string{"cpu", "elf", "mem", "perip", "rom"} {
+	for _, pkg := range []string{"cpu", "elf", "mem", "perip", "rom", "soc"} {
 		from := filepath.Join(repo, "internal", pkg)
 		if !fileExists(filepath.Join(from, pkg+".go")) && !dirHasGo(from) {
 			return fmt.Errorf("missing emulator package: %s (is -go-repo a checkout of RV32EMU?)", from)
